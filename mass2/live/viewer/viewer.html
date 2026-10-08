@@ -469,17 +469,24 @@ function currentSpeed() { return REPLAY ? REPLAY.speed : (S.controller?.speed ??
 // ======================================================================================
 // Data in
 async function poll() {
+  let s, since;
   try {
     const rowS = S.meta ? rowLength() : 0;
-    const since = S.baseRowS != null && S.baseRowS !== rowS ? 0 : S.nDone;  // a new row length: ask for a new base
-    const s = REPLAY ? REPLAY.state(since) : await fetchState(since, rowS);
+    since = S.baseRowS != null && S.baseRowS !== rowS ? 0 : S.nDone;  // a new row length: ask for a new base
+    s = REPLAY ? REPLAY.state(since) : await fetchState(since, rowS);
+  } catch (e) {
+    setStatus("Cannot reach the viewer server. Check that mass2-live-demo or mass2-live-view is still running.", true);
+    setTimeout(poll, POLL_MS);
+    return;
+  }
+  try {
     if (s.run !== S.run) {
       resetData(s.run);
       if (since > 0) { setTimeout(poll, 0); return; }  // a new run: ask again from the start
     }
     ingest(s);
   } catch (e) {
-    setStatus("Cannot reach the viewer server. Check that mass2-live-demo or mass2-live-view is still running.", true);
+    console.error("mass2 live viewer: could not show this update", e);  // a page bug, not the server: keep polling
   }
   setTimeout(poll, POLL_MS);
 }
@@ -544,6 +551,8 @@ function decodeRow(r) {  // a time-plot row from the server: {t, counts: {state:
 }
 
 function resetData(run) {
+  document.getElementById("specReadout").textContent = "";
+  document.getElementById("fallReadout").textContent = "";
   Object.assign(S, { run, meta: null, slices: [], current: [], channels: [], timeline: [], stateNames: [], view: null, nDone: 0, baseRows: [], baseRowS: null,
     overlay: [], detail: null, prev: null, rate: null, gain: {}, status: null, rowCache: null });
   T.byState = {}; T.stateSum = {};
@@ -781,12 +790,17 @@ function showDatasets() {
     picker.replaceChildren(...c.datasets.map(d => new Option(d.title, d.key)));
     picker.dataset.keys = keys;
   }
-  if (document.activeElement !== picker) picker.value = c.active;
+  if (pickerSending == null) picker.value = c.active;  // always the server's dataset, which anyone viewing may change
 }
+let pickerSending = null;  // a dataset this page asked for, until the server has answered
 document.getElementById("datasetPicker").onchange = async e => {
-  setStatus(`Switching to ${e.target.selectedOptions[0].text}…`, false);
-  if (REPLAY) REPLAY.switch(e.target.value);
-  else await fetch("api/dataset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: e.target.value }) });
+  const picker = e.target;
+  setStatus(`Starting a new run of ${picker.selectedOptions[0].text}…`, false);
+  picker.blur();
+  if (REPLAY) { REPLAY.switch(picker.value); return; }
+  pickerSending = picker.value;
+  try { await fetch("api/dataset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: picker.value }) }); }
+  finally { pickerSending = null; }
 };
 
 function setStatus(text, alert) {
@@ -798,7 +812,10 @@ function setStatus(text, alert) {
 function showStatus() {
   const st = S.status, c = S.controller;
   if (c && c.phase !== "running") return setStatus(`${c.phase}…`);
-  if (!st) return setStatus(REPLAY ? "" : "Waiting for the first processed chunks…");
+  if (!st || !st.records) {
+    const title = c?.datasets?.find(d => d.key === c.active)?.title;
+    return setStatus(REPLAY ? "" : title ? `Starting a new run of ${title}: first results in a few seconds…` : "Waiting for the first processed chunks…");
+  }
   const age = Date.now() / 1000 - st.updated_unix_s, notes = [];
   if (st.late_records) notes.push(`${fmt.int(st.late_records)} late records dropped`);
   if (st.channels_without_recipe.length) notes.push(`no recipe for ch ${st.channels_without_recipe.join(", ")}`);
@@ -1164,7 +1181,7 @@ function renderArray() {
   const xs = Object.values(L).map(p => p.x), ys = Object.values(L).map(p => p.y);
   const nx = Math.max(...xs) + 1, ny = Math.max(...ys) + 1;
   grid.style.gridTemplateColumns = `repeat(${nx}, minmax(0, 1fr))`;
-  const counts = Object.fromEntries(S.channels.map(ch => [ch, total(sumAll([ch], states))]));
+  const counts = Object.fromEntries(Object.keys(L).map(ch => [ch, total(sumAll([ch], states))]));  // every pixel, counted or not yet
   const expo = exposureS(states) || 1, rate = ch => counts[ch] / expo;
   const cmax = Math.max(1, ...Object.values(counts));
   const cfrac = n => n / cmax;  // from zero: channels with nearly equal rates look nearly equal
