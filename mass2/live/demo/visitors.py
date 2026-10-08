@@ -16,8 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..viewer.server import HistogramStore, MemorySampler, Route, Site
-from .launcher import DemoController
+from ..viewer.server import Controller, HistogramStore, MemorySampler, Route, Site
 
 RUN_PATH = re.compile(r"^/r/([0-9a-f]{12})(/.*)?$")
 
@@ -25,6 +24,7 @@ RUN_PATH = re.compile(r"^/r/([0-9a-f]{12})(/.*)?$")
 @dataclass
 class VisitorRun:
     site: Site
+    controller: Controller
     run_dir: Path
     last_seen: float = field(default_factory=time.time)
 
@@ -35,16 +35,15 @@ class VisitorRuns:
     def __init__(
         self,
         workdir: Path,
+        new_controller: Callable[[Path, HistogramStore], Controller],
         *,
         max_runs: int,
         dataset: str,
-        speed: float = 5.0,
-        repeats: int = 0,
         idle_s: float = 180.0,
-        new_controller: Callable[[Path, HistogramStore], DemoController] | None = None,
     ):
-        self.workdir, self.max_runs, self.dataset, self.speed, self.idle_s = Path(workdir), max_runs, dataset, speed, idle_s
-        self.new_controller = new_controller or (lambda run_dir, store: DemoController(run_dir, store, repeats))
+        """`new_controller(run_dir, store)` makes what runs a new run's pipeline (a `DemoController`)."""
+        self.workdir, self.new_controller = Path(workdir), new_controller
+        self.max_runs, self.dataset, self.idle_s = max_runs, dataset, idle_s
         self.runs: dict[str, VisitorRun] = {}
         self._lock = threading.Lock()
         shutil.rmtree(self.workdir / "runs", ignore_errors=True)  # runs from an earlier server are nobody's now
@@ -77,9 +76,8 @@ class VisitorRuns:
             run_dir = self.workdir / "runs" / run_id
             store = HistogramStore(run_dir / self.dataset / "hist")
             controller = self.new_controller(run_dir, store)
-            controller.speed = self.speed
             memory = MemorySampler("mass2-live-demo (serves every run)", controller)
-            run = VisitorRun(Site(store, controller, memory, extra=lambda: {"visitor": self.describe()}), run_dir)
+            run = VisitorRun(Site(store, controller, memory, extra=lambda: {"visitor": self.describe()}), controller, run_dir)
             self.runs[run_id] = run
         controller.switch(self.dataset)
         return run
@@ -95,17 +93,18 @@ class VisitorRuns:
             ended = [self.runs.pop(rid) for rid in idle]
             running = list(self.runs.values())
         for run in ended:
-            self._end(run)
+            _end(run)
         for run in running:
-            run.site.controller.maintain(max_gb)  # type: ignore[union-attr]
+            run.controller.maintain(max_gb)
 
     def stop_all(self) -> None:
         with self._lock:
             ended, self.runs = list(self.runs.values()), {}
         for run in ended:
-            self._end(run)
+            _end(run)
 
-    def _end(self, run: VisitorRun) -> None:
-        run.site.memory.stop()
-        run.site.controller.stop()  # type: ignore[union-attr]
-        shutil.rmtree(run.run_dir, ignore_errors=True)
+
+def _end(run: VisitorRun) -> None:
+    """Stop a run's tools and delete its folder."""
+    run.controller.stop()
+    shutil.rmtree(run.run_dir, ignore_errors=True)

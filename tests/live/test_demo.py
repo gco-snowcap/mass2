@@ -1,12 +1,17 @@
 """Tests for the demo environment and the viewer, which sit on top of the core.
 
-5. The simulator writes 100-record chunks with all channels and their original timestamps, replays the
+11. The simulator writes 100-record chunks with all channels and their original timestamps, replays the
    experiment states, scales copies, and follows a speed change while running.
-6. The viewer serves what the tools wrote; the demo switches datasets and changes speed from the page.
-7. The shareable page embeds an exact recording of the real pipeline.
+12. The demo gives a visitor a run of their own, which switches dataset and changes speed from its page.
+13. The shareable page embeds an exact recording of the real pipeline.
+14. A copy recorded at a different gain comes out at its source channel's energies, through its own recipe.
+15. The demo refuses playback speeds outside the viewer's range.
+16. Each visitor gets a run of their own, up to a limit, and a run nobody views is ended.
+17. A run whose tool fails starts over.
 """
 
 import json
+import math
 import threading
 import time
 import urllib.request
@@ -16,14 +21,18 @@ import polars as pl
 import pulsedata
 import pytest
 
+import mass2
+from mass2.live import states
+from mass2.live.apply_recipe import LiveRecipeApplier
 from mass2.live.demo import export, launcher, simulate
 from mass2.live.demo.datasets import DATASETS
+from mass2.live.demo.visitors import VisitorRuns
 from mass2.live.viewer import server
 
 PULSE_FOLDER = pulsedata.pulse_noise_ljh_pairs["bessy_20240727"].pulse_folder
 
 
-def test_5_simulator_chunks_states_copies_and_speed_changes(tmp_path):
+def test_11_simulator_chunks_states_copies_and_speed_changes(tmp_path):
     sources = simulate.load_ljh_sources(PULSE_FOLDER, max_pulses=2000)
     path, speed_file = tmp_path / "pulses.arrows", tmp_path / "speed.json"
     speed_file.write_text(json.dumps({"speed": 1}))  # real time: 2000 pulses would take minutes...
@@ -50,44 +59,49 @@ def test_5_simulator_chunks_states_copies_and_speed_changes(tmp_path):
     assert np.median(height(copy) / height(original)) == pytest.approx(1.05, abs=0.002)
 
 
-def test_6_viewer_and_demo_switch_dataset_and_speed(tmp_path):
-    store = server.HistogramStore(tmp_path / "bessy_20240727" / "hist")
-    controller = launcher.DemoController(tmp_path, store, sim_extra=["--max-pulses", "3000"])
-    srv, port = server.start_server(store, port=0, controller=controller)
-    url = f"http://127.0.0.1:{port}"
+def test_12_the_demo_gives_a_visitor_a_run_that_switches_dataset_and_speed(tmp_path):
+    controllers = []
+
+    def new_controller(run_dir, store):
+        controllers.append(launcher.DemoController(run_dir, store, sim_extra=["--max-pulses", "3000"]))
+        return controllers[-1]
+
+    runs = VisitorRuns(tmp_path, new_controller, max_runs=2, dataset="bessy_20240727")
+    srv, port = server.start_router_server(runs, port=0)
+    run_url = urllib.request.urlopen(f"http://127.0.0.1:{port}/").url  # the visitor is sent to their own run
 
     def post(path, body):
-        urllib.request.urlopen(urllib.request.Request(url + path, data=json.dumps(body).encode(), method="POST"))
+        urllib.request.urlopen(urllib.request.Request(run_url + path, data=json.dumps(body).encode(), method="POST"))
 
     def state_when(ok, timeout=120):
         t0 = time.time()
         while time.time() - t0 < timeout:
-            s, _ = server.from_arrow_ipc(urllib.request.urlopen(f"{url}/api/state?since=0").read())
+            s, _ = server.from_arrow_ipc(urllib.request.urlopen(f"{run_url}api/state").read())
             if ok(s):
                 return s
-            assert not controller.failed()
+            assert not controllers[0].failed()
             time.sleep(0.5)
         raise AssertionError("timed out")
 
     try:
-        controller.switch("bessy_20240727")
-        post("/api/speed", {"speed": 60})
-        assert json.loads((tmp_path / "bessy_20240727" / "speed.json").read_text()) == {"speed": 60.0}
+        assert "/r/" in run_url and "<canvas" in urllib.request.urlopen(run_url).read().decode()
+        post("api/speed", {"speed": 60})
+        run_dir = controllers[0].workdir / "bessy_20240727"
+        assert json.loads((run_dir / "speed.json").read_text()) == {"speed": 60.0}
         s = state_when(lambda s: s["status"] and s["status"]["records"] > 2000)
-        assert len(s["channels"]) == 16 and s["meta"]["layout"]["4224"]["gain"] == 1.03
-        assert s["status"]["channels_without_recipe"] == []  # every simulated copy borrows a real recipe
-        assert s["controller"]["speed"] == 60
-        assert "<canvas" in urllib.request.urlopen(url + "/").read().decode()
+        assert len(s["meta"]["layout"]) == 16 and s["meta"]["layout"]["4224"]["gain"] == 1.03
+        assert s["status"]["channels_without_recipe"] == []  # every copy has a recipe, its own or its source's
+        assert s["controller"]["speed"] == 60 and s["visitor"]["runs"] == 1
 
-        post("/api/dataset", {"key": "20230626"})
+        post("api/dataset", {"key": "20230626"})
         s = state_when(lambda s: s["meta"] and s["meta"]["e_hi"] == 10000 and s["status"] and s["status"]["records"] > 0)
         assert s["controller"]["active"] == "20230626"
     finally:
-        controller.stop()
+        runs.stop_all()
         srv.shutdown()
 
 
-def test_7_shareable_page_holds_an_exact_recording(tmp_path):
+def test_13_shareable_page_holds_an_exact_recording(tmp_path):
     dataset = DATASETS["gamma_20241005"]  # the smallest dataset
     rec = export.record(dataset, tmp_path / "gamma")
     results = pl.read_ipc_stream(tmp_path / "gamma" / "analyzed.arrows")
@@ -101,3 +115,93 @@ def test_7_shareable_page_holds_an_exact_recording(tmp_path):
     export.write_replay_page([rec], page)
     embedded = page.read_text().split("window.MASS2_REPLAY = ", 1)[1].split(";</script>", 1)[0]
     assert json.loads(embedded)["datasets"][0]["key"] == "gamma_20241005"
+
+
+MN = DATASETS["20230626"]
+
+
+def test_14_a_copy_at_another_gain_matches_its_source_through_its_own_recipe(tmp_path):
+    copy = next(p for p in MN.pixels if p.source_ch is not None and p.gain != 1.0)
+    sources = simulate.load_ljh_sources(MN.pulse_folder, max_pulses=1500)
+    path = tmp_path / "pulses.arrows"
+    simulate.simulate(sources, path, pace=False, scaled=[simulate.ScaledChannel(copy.source_ch, copy.ch_num, copy.gain)])
+    raw = states.StateFileFollower(None).label(pl.read_ipc_stream(path))
+    recipes = mass2.misc.unpickle_object(MN.recipe_path)
+    assert copy.ch_num in recipes  # learned from the copy's own scaled pulses
+
+    def energies(applier: LiveRecipeApplier, ch: int) -> np.ndarray:
+        out = applier.process(raw).filter(pl.col("ch_num") == ch).sort("subframecount")
+        return out[MN.energy_col].to_numpy()
+
+    source = energies(LiveRecipeApplier(recipes), copy.source_ch)
+    own = energies(LiveRecipeApplier(recipes, {copy.ch_num: copy.source_ch}), copy.ch_num)  # its own recipe wins over the alias
+    borrowed = energies(LiveRecipeApplier({copy.source_ch: recipes[copy.source_ch]}, {copy.ch_num: copy.source_ch}), copy.ch_num)
+    near_mn = (source > 5800) & (source < 6000)
+    assert near_mn.sum() > 100
+    assert np.median(np.abs(own[near_mn] - source[near_mn])) < 1.0  # eV
+    assert abs(np.median(borrowed[near_mn] / source[near_mn]) - 1) > 0.01  # the source's recipe would be off by about the gain
+
+
+def test_15_the_demo_refuses_speeds_outside_the_viewers_range(tmp_path):
+    controller = launcher.DemoController(tmp_path, server.HistogramStore(tmp_path / "hist"))
+    for ok in [1, 5, 600]:
+        controller.set_speed(ok)
+        assert controller.speed == ok
+    for bad in [0, 0.5, -5, 601, 1e308, math.inf, math.nan]:
+        with pytest.raises(ValueError):
+            controller.set_speed(bad)
+    assert controller.speed == 600
+
+
+class _FakeController:
+    """Stands in for DemoController: records what it is asked to do, starts no processes."""
+
+    def __init__(self, run_dir, store):
+        self.run_dir, self.store, self.speed, self.active, self.stopped, self.maintained = run_dir, store, 5.0, None, False, 0
+
+    def switch(self, key):
+        self.active = key
+
+    def describe(self):
+        return {"active": self.active}
+
+    @staticmethod
+    def pids():
+        return {}
+
+    def maintain(self, max_gb):
+        self.maintained += 1
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_16_each_visitor_gets_a_run_of_their_own(tmp_path):
+    runs = VisitorRuns(tmp_path, _FakeController, max_runs=2, dataset="bessy_20240727", idle_s=60)
+    a, b = runs.route("/").redirect, runs.route("/").redirect
+    assert a != b and a.startswith("/r/") and a.endswith("/")
+    assert runs.route("/").busy  # a third visitor waits
+    site_a, site_b = runs.route(a + "api/state").site, runs.route(b).site
+    assert site_a is not site_b and site_a.controller.active == "bessy_20240727"
+    assert runs.route(a + "api/state").path == "/api/state" and runs.route(a + "arrow.js").path == "/arrow.js"
+    assert runs.route(a.rstrip("/")).redirect == a and runs.route("/r/nothex/").site is None
+
+    runs.runs[b.split("/")[2]].last_seen -= 120  # b's page has been closed for two minutes
+    runs.tick(max_gb=4)
+    assert site_b.controller.stopped and not site_a.controller.stopped and site_a.controller.maintained == 1
+    assert runs.route("/").redirect  # a slot is free again
+    revived = runs.route(b + "api/state").site  # b's old address now starts a new run (or waits when all are in use)
+    assert revived is None or revived is not site_b
+    runs.stop_all()
+    assert site_a.controller.stopped and runs.runs == {}
+
+
+def test_17_a_run_whose_tool_fails_starts_over(tmp_path, monkeypatch):
+    controller = launcher.DemoController(tmp_path, server.HistogramStore(tmp_path / "hist"))
+    starts = []
+    monkeypatch.setattr(controller, "switch", starts.append)
+    controller.active = "20230626"
+    monkeypatch.setattr(controller, "failed", lambda: ["mass2-live-apply"])
+    for _ in range(5):
+        controller.maintain(max_gb=4)
+    assert starts == ["20230626"] * 3  # three quick restarts, then at most one a minute

@@ -181,7 +181,12 @@ def run_fits(hist_dir: str | Path, roi: RoiFit, every_s: float = 10.0, poll_s: f
                     (out / "latest.png.tmp").write_bytes(made[1])
                     (out / "latest.png.tmp").replace(out / "latest.png")
                 write_text_atomically(
-                    json.dumps({"roi": asdict(roi) | {"label": roi.label}, "every_s": every_s, "states": fitter.states, "fits": fitter.fits}),
+                    json.dumps({
+                        "roi": asdict(roi) | {"label": roi.label},
+                        "every_s": every_s,
+                        "states": fitter.states,
+                        "fits": fitter.fits,
+                    }),
                     out / "fits.json",
                 )
         if tailer.ended:

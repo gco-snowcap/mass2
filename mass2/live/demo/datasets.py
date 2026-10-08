@@ -194,7 +194,11 @@ def build_recipe(dataset: DemoDataset, path: str | Path) -> None:
     """
     path = Path(path)
     data = mass2.Channels.from_ljh_folder(dataset.pulse_folder, dataset.noise_folder).with_experiment_state_by_path()
-    copies = {p.ch_num: gain_copy(data.channels[p.source_ch], p.ch_num, p.gain) for p in dataset.pixels if p.source_ch is not None and p.gain != 1.0}
+    copies = {
+        p.ch_num: gain_copy(data.channels[p.source_ch], p.ch_num, p.gain)
+        for p in dataset.pixels
+        if p.source_ch is not None and p.gain != 1.0
+    }
     data = replace(data, channels=data.channels | copies)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     data.map(dataset.learn).save_recipes(str(tmp), required_fields=dataset.energy_col)

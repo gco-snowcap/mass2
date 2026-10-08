@@ -144,6 +144,7 @@
   .file.written, .proc.running { border-color: var(--lit); background: var(--lit-bg); transition: none; }
   .proc .name { font-weight: 650; }
   .proc .what { font-size: 0.8125rem; color: var(--muted); margin-top: 2px; }
+  .proc .src { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.75rem; color: var(--muted); }
   ol.steps { list-style: none; margin: 8px 0 0; padding: 0; counter-reset: step; }
   ol.steps li { counter-increment: step; display: grid; grid-template-columns: 28px 1fr auto; gap: 2px 8px; align-items: start; padding: 8px 8px; border-radius: 5px; transition: background-color 0.6s; }
   ol.steps li::before { content: counter(step); width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--rule); display: grid; place-items: center; font-size: 0.75rem; font-weight: 650; color: var(--muted); transition: all 0.6s; }
@@ -281,10 +282,6 @@
   <aside class="panel array-panel" aria-labelledby="arrayTitle">
     <h2 id="arrayTitle">Detector array</h2>
     <p class="desc small muted" id="arrayDesc">Each square is one detector channel, drawn at its position in the array. Tap squares to overlay their spectra.</p>
-    <div class="tools" style="margin-top:8px">
-      <span class="label">Colour by</span>
-      <span class="seg"><button id="mCounts" aria-pressed="true">Good pulses</button><button id="mGain" aria-pressed="false">Energy-scale check</button></span>
-    </div>
     <div id="grid" role="group" aria-label="Detector channels"></div>
     <div id="gridKey"></div>
     <p class="small muted" id="metricNote" style="margin-top:6px"></p>
@@ -299,7 +296,7 @@
     <div class="file" id="f-ljh"><div class="kind">Detector data, original</div><div class="name">*.ljh</div><div class="stats"></div></div>
     <div class="file" id="f-recipe"><div class="kind">Saved recipe, loaded once at start</div><div class="name"></div><div class="stats"></div></div>
     <div class="arrow">↓ read by</div>
-    <div class="proc" id="p-sim"><div class="name">mass2-live-sim</div><div class="what"></div></div>
+    <div class="proc" id="p-sim"><div class="name">mass2-live-sim</div><div class="src">mass2/live/demo/simulate.py · Python</div><div class="what"></div></div>
     <div class="arrow">↓ appends to</div>
     <div class="file" id="f-input"><div class="kind">Raw pulses, Arrow IPC stream, growing</div><div class="name">pulses.arrows</div><div class="stats"></div></div>
     <div class="file" id="f-statesfile"><div class="kind">Experiment state log, text, growing</div><div class="name">pulses_experiment_state.txt</div><div class="stats"></div></div>
@@ -309,6 +306,7 @@
     <h3>The loop in mass2-live-apply</h3>
     <div class="proc" id="p-apply">
       <div class="name"><span class="flow-dot" id="loopDot"></span>mass2-live-apply</div>
+      <div class="src">mass2/live/apply_recipe.py (run_live) · Python</div>
       <div class="what" id="applyWhat"></div>
       <ol class="steps" id="steps">
         <li data-step="read"><span class="t">Read new chunks</span><span class="m"></span><span class="d">Take every complete record batch appended to pulses.arrows since the last poll.</span></li>
@@ -329,11 +327,15 @@
     <div class="file" id="f-current"><div class="kind">Slice still filling, rewritten each poll</div><div class="name">hist/histograms_current.arrows</div><div class="stats"></div></div>
     <div class="file" id="f-states"><div class="kind">State changes seen so far</div><div class="name">hist/states.json</div><div class="stats"></div></div>
     <div class="file" id="f-status"><div class="kind">Counters for this page</div><div class="name">hist/status.json</div><div class="stats"></div></div>
-    <div class="arrow">↓ histograms.arrows is also read by</div>
-    <div class="proc" id="p-fit"><div class="name">mass2-live-fit (separate process)</div><div class="what" id="fitWhat"></div></div>
+    <div class="arrow">↓ histograms.arrows read by</div>
+    <div class="proc" id="p-fit"><div class="name">mass2-live-fit</div><div class="src">mass2/live/fit.py · Python</div><div class="what" id="fitWhat"></div></div>
+    <div class="arrow">↓ writes</div>
     <div class="file" id="f-fits"><div class="kind">Every fit so far, and the latest plotm image</div><div class="name">hist/fits/fits.json, hist/fits/latest.png</div><div class="stats"></div></div>
-    <div class="arrow">↓ all read by</div>
-    <div class="proc" id="p-view"><div class="name">This page</div><div class="what" id="viewWhat"></div></div>
+    <div class="arrow">↓ every file above read by</div>
+    <div class="proc" id="p-server"><div class="name">The viewer server</div><div class="src">mass2/live/viewer/server.py · Python</div>
+      <div class="what">Follows histograms.arrows, keeping the run's totals by channel and state and the recent slices summed over channels; on each request it sends what the page draws: the totals, and the newest rows of the energy-vs-time plot at the page's row length.</div></div>
+    <div class="arrow">↓ every 2 s, as an Arrow IPC stream over HTTP (GET api/state)</div>
+    <div class="proc" id="p-view"><div class="name">This page</div><div class="src">mass2/live/viewer/viewer.html · JavaScript</div><div class="what" id="viewWhat"></div></div>
   </div>
 </main>
 
@@ -346,7 +348,6 @@ const CHANNEL_COLOURS = ["#0072b2", "#d55e00", "#009e73", "#cc79a7", "#e69f00", 
 const STATE_COLOURS = ["#4e79a7", "#e15759", "#59a14f", "#b07aa1", "#f28e2b", "#76b7b2", "#9c755f", "#edc948"];
 const NO_STATE = "(none)", NO_STATE_COLOUR = "#b8c0c4";
 const RAMP = [[0, 34, 78], [57, 72, 108], [112, 113, 115], [168, 157, 113], [230, 205, 80], [253, 234, 69]];  // cividis-like
-const DIVERGING = [[33, 102, 172], [146, 197, 222], [236, 236, 236], [244, 165, 130], [178, 24, 43]];  // blue – neutral – red
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 let INK, MUTED, RULE, PANEL;
 function readTheme() { INK = css("--ink"); MUTED = css("--muted"); RULE = css("--rule"); PANEL = css("--panel"); }
@@ -381,16 +382,15 @@ const fmt = {
 // ======================================================================================
 // State
 const S = {
-  run: null, meta: null, slices: [], current: [], channels: [], status: null, controller: null,
-  nDone: 0,            // finished slices accounted for, in the totals and the time-plot rows
-  baseRows: [], baseRowS: null,  // time-plot rows the server built for this page's row length
-  timeline: [], stateNames: [], hiddenStates: new Set(), overlay: [], metric: "counts", log: true, view: null,
+  run: null, meta: null, channels: [], status: null, controller: null,
+  rows: [], rowS: null,  // the time-plot rows the server (or the recording) built, and their length, s
+  nSlices: 0, openGood: 0,
+  timeline: [], stateNames: [], hiddenStates: new Set(), overlay: [], log: true, view: null,
   tab: "spectra", detail: null, fits: null,
   eachState: false,    // spectrum: one curve per selected state, in its colour, instead of their sum
   rowChoice: null,     // time plot: row length chosen in the page, seconds of data; null = follow the playback speed
   prev: null,          // previous status, for "+N since last update" and the rate
   rate: null,
-  gain: {},            // channel -> apparent gain (fraction) or null
 };
 const REPLAY = window.MASS2_REPLAY ? makeReplay(window.MASS2_REPLAY) : null;
 const POLL_MS = REPLAY ? 500 : 2000;  // a replay ticks once per recorded poll of mass2-live-apply
@@ -413,31 +413,35 @@ function makeReplay(data) {
     d.duration = d.slices.length * d.meta.slice_s;
     d.firstT = (d.slices.find(([, recs]) => recs > 0) ?? [0])[0];
   }
-  let active = data.datasets[0].key, run = 1, speed = 5, virt = 0, lastWall = Date.now();
+  let active = data.datasets[0].key, run = 0, speed = 5, virt = 0, lastWall = Date.now();
   const tick = () => { const now = Date.now(); virt += (now - lastWall) / 1000 * speed; lastWall = now; return virt; };
-  const restart = () => { virt = 0; lastWall = Date.now(); run += 1; };  // a new dataset only
+  let acc;  // what has been replayed so far: totals by state and channel, and the slices, newest last
+  const restart = () => { virt = 0; lastWall = Date.now(); run += 1; acc = { k: 0, totals: {}, history: [] }; };  // a new dataset only
+  restart();
 
   return {
     speeds: [1, 2, 5, 10, 30, 60, 120, 300, 600],
     get speed() { return speed; },
     setSpeed(x) { tick(); speed = x; },
     switch(key) { if (byKey[key]) { active = key; restart(); } },
-    state(since) {
+    state(rowS) {
       // The recording is replayed again and again, continuing the timeline, as mass2-live-demo does: pass p
       // of the data is shifted p recording-lengths later, and every count keeps adding up.
-      const d = byKey[active], t0 = d.meta.t0, sl = d.meta.slice_s, N = d.slices.length;
+      const d = byKey[active], t0 = d.meta.t0, sl = d.meta.slice_s, N = d.slices.length, nb = d.meta.nbins;
       const elapsed = tick(), nDone = Math.floor(elapsed / sl), passOf = k => Math.floor(k / N);
-      const shift = k => passOf(k) * d.duration;
+      for (; acc.k < nDone; acc.k++) {  // add the slices finished since the last answer
+        const [t, , , counts] = d.slices[acc.k % N];
+        for (const [st, chans] of Object.entries(counts)) for (const [ch, h] of Object.entries(chans)) decodeInto(((acc.totals[st] ??= {})[ch] ??= new Float32Array(nb)), h);
+        acc.history.push({ t: t0 + passOf(acc.k) * d.duration + t, counts });
+      }
+      if (acc.history.length > 20000) acc.history.splice(0, acc.history.length - 20000);
       const end = d.cum[N], c = d.cum[nDone % N], p = passOf(nDone);
       const [records, chunks, good] = [0, 1, 2].map(j => p * end[j] + c[j]), bpc = d.meta.bytes_per_chunk;
       const states = [];
       for (let q = 0; q <= p; q++) for (const [t, l] of d.states) if (q * d.duration + t <= elapsed) states.push([t0 + q * d.duration + t, l]);
-      const slices = [];
-      for (let k = Math.max(0, since); k < nDone; k++) { const [t, , , counts] = d.slices[k % N]; slices.push({ t: t0 + shift(k) + t, counts }); }
       const inPass = elapsed - p * d.duration;
       return {
-        run, meta: d.meta, n_slices: nDone, states, current: [], slices,
-        channels: Object.keys(d.meta.layout).sort((a, b) => a - b),
+        run, meta: d.meta, n_slices: nDone, open_good: 0, states, totals: acc.totals, ...timeRowsOf(acc.history, rowS || sl, nb),
         status: {
           records, chunks, polls: nDone, good_pulses: good, late_records: 0, channels_without_recipe: [],
           input_bytes: Math.round(chunks * bpc.input), output_bytes: Math.round(chunks * bpc.output),
@@ -464,7 +468,7 @@ function setupSpeed() {
     show(x);
     if (REPLAY) REPLAY.setSpeed(x);
     else await fetch("api/speed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ speed: x }) });
-    render();
+    poll();  // Auto rows follow the speed
   });
   return { label, show };
 }
@@ -472,101 +476,89 @@ const SPEED = setupSpeed();
 function currentSpeed() { return REPLAY ? REPLAY.speed : (S.controller?.speed ?? 1); }
 
 // ======================================================================================
-// Data in
-let failingSince = null;  // when requests to the server started failing
+// Data in. Every answer, from the live server or from a recording, holds what the plots draw: `totals`
+// ({state: {channel: counts}}) and `rows` ([{t, stateSum: {state: counts}}], the newest time-plot rows, `row_s`
+// long). The page keeps nothing between answers but its own choices.
+let failingSince = null, pollTimer = null;  // when requests to the server started failing; the next poll
 async function poll() {
-  let s, since;
+  clearTimeout(pollTimer);
+  let s;
   try {
     const rowS = S.meta ? rowLength() : 0;
-    since = S.baseRowS != null && S.baseRowS !== rowS ? 0 : S.nDone;  // a new row length: ask for a new base
-    s = REPLAY ? REPLAY.state(since) : await fetchState(since, rowS);
+    s = REPLAY ? REPLAY.state(rowS) : await fetchState(rowS);
   } catch (e) {
     failingSince ??= Date.now();
     const secs = (Date.now() - failingSince) / 1000;
     if (e.message === "busy") setStatus("Every run this computer can host is in use; retrying…", false);
     else if (secs < 30) setStatus("Connection interrupted; retrying…", false);  // e.g. the tunnel reconnecting: usually seconds
     else setStatus(`Cannot reach the viewer server for ${Math.round(secs)} s. Check that mass2-live-demo or mass2-live-view is still running.`, true);
-    setTimeout(poll, POLL_MS);
+    pollTimer = setTimeout(poll, POLL_MS);
     return;
   }
   failingSince = null;
   try {
-    if (s.run !== S.run) {
-      resetData(s.run);
-      if (since > 0) { setTimeout(poll, 0); return; }  // a new run: ask again from the start
-    }
+    if (s.run !== S.run) resetData(s.run);
     ingest(s);
   } catch (e) {
     console.error("mass2 live viewer: could not show this update", e);  // a page bug, not the server: keep polling
   }
-  setTimeout(poll, POLL_MS);
+  pollTimer = setTimeout(poll, POLL_MS);
 }
 
-// ---- the live server's answer: an Arrow IPC stream, one row per histogram (kind, t, state, ch_num, and its
-// nonempty bins and their counts), with everything else as JSON in the schema metadata. It is turned into the
-// shapes a recording holds, with each histogram as {bins, counts} typed arrays read straight from the stream.
+// ---- the live server's answer: an Arrow IPC stream, one row per histogram (kind "total" or "row", t, state,
+// ch_num, its nonempty bins and their counts), with everything else as JSON in the schema metadata.
 const ARROW = REPLAY ? null : new Promise((ok, fail) => {
   const el = document.createElement("script");
   el.src = "arrow.js"; el.onload = ok; el.onerror = fail;
   document.head.append(el);
 });
-async function fetchState(since, rowS) {
+async function fetchState(rowS) {
   await ARROW;
-  const res = await fetch(`api/state?since=${since}&row_s=${rowS}`, { cache: "no-store" });
+  const res = await fetch(`api/state?row_s=${rowS}`, { cache: "no-store" });
   if (!res.ok) throw new Error(res.status === 503 ? "busy" : `HTTP ${res.status}`);
   const table = Arrow.tableFromIPC(new Uint8Array(await res.arrayBuffer()));
   const s = JSON.parse(table.schema.metadata.get("mass2.live"));
-  const col = name => table.getChild(name);
-  const [kind, t, state, ch, bins, counts] = ["kind", "t", "state", "ch_num", "bins", "counts"].map(col);
-  const groups = { total: new Map(), row: new Map(), slice: new Map(), open: new Map() };
+  const [kind, t, state, ch, bins, counts] = ["kind", "t", "state", "ch_num", "bins", "counts"].map(name => table.getChild(name));
+  const totals = {}, rows = new Map();
   for (let i = 0; i < table.numRows; i++) {
-    const g = groups[kind.get(i)], key = t.get(i) ?? 0;
-    if (!g.has(key)) g.set(key, { t: key, counts: {} });
-    ((g.get(key).counts[state.get(i)] ??= {})[String(ch.get(i))] = { bins: bins.get(i).toArray(), counts: counts.get(i).toArray() });
+    const h = new Float32Array(s.meta.nbins);
+    decodeInto(h, { bins: bins.get(i).toArray(), counts: counts.get(i).toArray() });
+    if (kind.get(i) === "total") (totals[state.get(i)] ??= {})[String(ch.get(i))] = h;
+    else {
+      const at = t.get(i);
+      if (!rows.has(at)) rows.set(at, { t: at, stateSum: {} });
+      rows.get(at).stateSum[state.get(i)] = h;
+    }
   }
-  s.slices = [...groups.slice.values()];
-  s.current = [...groups.open.values()];
-  s.base = s.base ? { totals: groups.total.get(0)?.counts ?? {}, row_s: s.row_s, rows: [...groups.row.values()] } : null;
-  return s;
+  return Object.assign(s, { totals, rows: [...rows.values()].sort((a, b) => a.t - b.t) });
 }
 
-// Slices arrive sparse: {t, counts: {state: {channel: [bin gap, count, ...]}}}. Each finished slice is added once
-// into running totals (for the spectrum and the map) and kept sparse (for the time plot) until its row is
-// built. The slice still filling (live server only) is decoded fresh on each update. A page starting, or far
-// behind, gets a `base` from the live server instead: the totals so far and the newest time-plot rows.
-const T = { byState: {}, stateSum: {} };
 function decodeInto(target, h) {  // h: {bins, counts} from the live server, or [bin gap, count, ...] from a recording
   if (Array.isArray(h)) { for (let q = 0, i = 0; q < h.length; q += 2) { i += h[q]; target[i] += h[q + 1]; } return; }
   const { bins, counts } = h;
   for (let k = 0; k < bins.length; k++) target[bins[k]] += counts[k];
 }
-function addToTotals(counts) {
-  const nb = S.meta.nbins;
-  for (const [st, chans] of Object.entries(counts)) for (const [ch, pairs] of Object.entries(chans)) {
-    decodeInto(((T.byState[st] ??= {})[ch] ??= new Float32Array(nb)), pairs);
-    decodeInto((T.stateSum[st] ??= new Float32Array(nb)), pairs);
+
+// For a recording: the newest MAX_ROWS rows of the time plot, `len` s long, by state, summed over channels.
+const MAX_ROWS = 120;  // more than the canvas shows (one row needs at least 4 px)
+function timeRowsOf(history, len, nb) {
+  const rows = new Map(), newest = history.length ? Math.floor(history.at(-1).t / len) : 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const r = Math.floor(history[i].t / len);
+    if (r <= newest - MAX_ROWS) break;
+    if (!rows.has(r)) rows.set(r, { t: r * len, stateSum: {} });
+    const row = rows.get(r);
+    for (const [st, chans] of Object.entries(history[i].counts)) for (const h of Object.values(chans)) decodeInto((row.stateSum[st] ??= new Float32Array(nb)), h);
   }
-}
-function decodeOpen(slice) {  // the open slice, dense, by state and channel, for sumAll
-  const nb = S.meta.nbins, row = { t: slice.t, stateSum: {}, byState: {} };
-  for (const [st, chans] of Object.entries(slice.counts)) for (const [ch, pairs] of Object.entries(chans)) {
-    decodeInto((row.stateSum[st] ??= new Float32Array(nb)), pairs);
-    decodeInto(((row.byState[st] ??= {})[ch] = new Float32Array(nb)), pairs);
-  }
-  return row;
+  return { rows: [...rows.values()].sort((a, b) => a.t - b.t), row_s: len };
 }
 
-function decodeRow(r) {  // a time-plot row from the server: {t, counts: {state: {"0": histogram}}}, summed over channels
-  const row = { t: r.t, stateSum: {}, live: false };
-  for (const [st, chans] of Object.entries(r.counts)) for (const pairs of Object.values(chans)) decodeInto((row.stateSum[st] ??= new Float32Array(S.meta.nbins)), pairs);
-  return row;
-}
-
+const T = { byState: {}, stateSum: {} };  // totals by state and channel, and by state summed over channels
 function resetData(run) {
   document.getElementById("specReadout").textContent = "";
   document.getElementById("fallReadout").textContent = "";
-  Object.assign(S, { run, meta: null, slices: [], current: [], channels: [], timeline: [], stateNames: [], view: null, nDone: 0, baseRows: [], baseRowS: null,
-    overlay: [], detail: null, prev: null, rate: null, gain: {}, status: null, rowCache: null });
+  Object.assign(S, { run, meta: null, rows: [], rowS: null, channels: [], timeline: [], stateNames: [], view: null,
+    overlay: [], detail: null, prev: null, rate: null, status: null });
   T.byState = {}; T.stateSum = {};
   S.hiddenStates.clear();
 }
@@ -576,21 +568,21 @@ function ingest(s) {
   showDatasets();
   if (s.meta) {
     if (!S.meta) { S.meta = s.meta; S.view = [s.meta.e_lo, s.meta.e_hi]; }
-    if (s.base) {  // totals and rows so far; the slices that follow are those of the row still filling, already in the totals
-      T.byState = {}; T.stateSum = {};
-      addToTotals(s.base.totals);
-      S.baseRows = s.base.rows.map(decodeRow); S.baseRowS = s.base.row_s;
-      S.slices = [...s.slices]; S.rowCache = null;
-    } else for (const sl of s.slices) { addToTotals(sl.counts); S.slices.push(sl); }
-    S.nDone = s.n_slices;
-    S.current = s.current.map(decodeOpen);
+    T.byState = s.totals;
+    T.stateSum = Object.fromEntries(Object.entries(s.totals).map(([st, chans]) => {
+      const sum = new Float32Array(s.meta.nbins);
+      for (const h of Object.values(chans)) for (let i = 0; i < h.length; i++) sum[i] += h[i];
+      return [st, sum];
+    }));
+    S.rows = s.rows; S.rowS = s.row_s; S.nSlices = s.n_slices; S.openGood = s.open_good;
     S.timeline = s.states;
     S.fits = s.fits || null;
     S.processes = s.processes ?? null;
     S.fileBytes = s.file_bytes ?? null;
     S.visitor = s.visitor ?? null;
-    S.channels = s.channels;
-    noteStates(s);
+    const counted = new Set(Object.values(s.totals).flatMap(chans => Object.keys(chans)));
+    S.channels = [...new Set([...Object.keys(s.meta.layout ?? {}), ...counted])].sort((a, b) => a - b);
+    noteStates();
     if (!REPLAY) followSelection(s.selected_states);
     const st = s.status;
     if (st && S.status && st.updated_unix_s > S.status.updated_unix_s) {
@@ -599,7 +591,6 @@ function ingest(s) {
     }
     S.prev = S.status;
     S.status = st;
-    if (!S.prev || !st || st.good_pulses !== S.prev.good_pulses || !Object.keys(S.gain).length) S.gain = gainCheck();
     SPEED.label.hidden = !(REPLAY || S.controller);
     if (document.activeElement !== document.getElementById("speed")) SPEED.show(currentSpeed());
     render();
@@ -608,49 +599,17 @@ function ingest(s) {
   showStatus();
 }
 
-// ---- time-plot rows: groups of consecutive slices, sized so a row fills in ~12 s of wall time at the
-// current playback speed (never shorter than one slice). Finished rows are built once and kept.
-const MAX_ROWS = 120;  // more than the canvas shows (one row needs at least 4 px)
+// ---- time-plot row length: chosen in the page, or long enough to fill in ~12 s of wall time at the current
+// playback speed; never shorter than one slice
 const ROW_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 21600, 43200];
 function rowLength() {
-  const base = S.meta.slice_s, want = S.rowChoice ?? currentSpeed() * 12;  // chosen, or ~12 s of wall time at this speed
+  const base = S.meta.slice_s, want = S.rowChoice ?? currentSpeed() * 12;
   const nice = ROW_STEPS.find(x => x >= want) ?? want;
   return Math.max(1, Math.round(nice / base)) * base;
 }
-function timeRows() {
-  const len = rowLength(), base = S.meta.slice_s;
-  const fromServer = S.baseRowS === len ? S.baseRows : [];
-  if (!S.slices.length && !S.current.length && !fromServer.length) return { len, rows: [] };
-  if (!S.rowCache || S.rowCache.len !== len) {
-    const first = (fromServer[0] ?? S.slices[0] ?? S.current[0]).t;
-    S.rowCache = { len, origin: Math.floor(first / len) * len, done: [...fromServer], next: 0 };
-  }
-  const C = S.rowCache, nb = S.meta.nbins, rowOf = t => Math.floor((t - C.origin) / len + 1e-9);
-  const lastDone = C.done.at(-1);
-  const dataEnd = S.slices.length ? S.slices.at(-1).t + base : lastDone ? lastDone.t + len : C.origin;
-  const firstOpenRow = rowOf(dataEnd);  // rows before this one have all their slices
-  const build = (k, members) => {
-    const row = { t: C.origin + k * len, stateSum: {}, live: false };
-    for (const sl of members) for (const [st, chans] of Object.entries(sl.counts)) for (const pairs of Object.values(chans)) decodeInto((row.stateSum[st] ??= new Float32Array(nb)), pairs);
-    return row;
-  };
-  // finish rows that are now complete
-  let i = C.next;
-  while (i < S.slices.length && rowOf(S.slices[i].t) < firstOpenRow) {
-    const k = rowOf(S.slices[i].t), members = [];
-    while (i < S.slices.length && rowOf(S.slices[i].t) === k) members.push(S.slices[i++]);
-    C.done.push(build(k, members));
-  }
-  C.next = i;
-  if (C.done.length > MAX_ROWS) C.done.splice(0, C.done.length - MAX_ROWS);
-  if (!REPLAY) { S.slices.splice(0, C.next); C.next = 0; }  // built into rows; a new row length brings a new base
-  // the row still filling: its finished slices, plus the slice the server is still filling
-  const rows = [...C.done];
-  const open = build(firstOpenRow, S.slices.slice(C.next));
-  for (const cur of S.current) for (const [st, a] of Object.entries(cur.stateSum)) { const t = (open.stateSum[st] ??= new Float32Array(nb)); for (let j = 0; j < nb; j++) t[j] += a[j]; }
-  open.live = true;
-  rows.push(open);
-  return { len, rows };
+function timeRows() {  // the rows to draw; the one holding the newest data is still filling
+  const latest = S.status?.latest_data_us ? S.status.latest_data_us / 1e6 : Infinity, len = S.rowS;
+  return { len, rows: S.rows.map(r => ({ ...r, live: latest < r.t + len })) };
 }
 
 // ======================================================================================
@@ -665,23 +624,16 @@ function noteStates() {
   const add = st => { if (!seen.has(st)) { seen.add(st); S.stateNames.push(st); } };
   for (const [, label] of S.timeline) add(label);
   for (const st of Object.keys(T.stateSum)) add(st);
-  for (const r of S.current) for (const st of Object.keys(r.stateSum)) add(st);
 }
 
-// Good pulses at the finest bin size, summed over all time: running totals plus the open slice.
-// chans = null means all channels.
+// Good pulses at the finest bin size, summed over the whole run. chans = null means all channels.
 function sumAll(chans, states) {
   const out = new Float32Array(S.meta.nbins);
   const add = a => { if (a) for (let i = 0; i < a.length; i++) out[i] += a[i]; };
   for (const st of states) {
-    if (chans == null) { add(T.stateSum[st]); for (const r of S.current) add(r.stateSum[st]); continue; }
-    for (const ch of chans) { add(T.byState[st]?.[ch]); for (const r of S.current) add(r.byState[st]?.[ch]); }
+    if (chans == null) add(T.stateSum[st]);
+    else for (const ch of chans) add(T.byState[st]?.[ch]);
   }
-  return out;
-}
-function rowSum(row, states) {
-  const out = new Float32Array(S.meta.nbins);
-  for (const st of states) { const a = row.stateSum[st]; if (a) for (let i = 0; i < a.length; i++) out[i] += a[i]; }
   return out;
 }
 
@@ -735,61 +687,6 @@ function layout() {
   if (L) return L;
   const n = S.channels.length, nx = Math.ceil(Math.sqrt(n)), out = {};  // no layout given: a plain square grid
   S.channels.forEach((ch, k) => { out[ch] = { x: k % nx, y: Math.floor(k / nx), copy_of: null, gain: 1 }; });
-  return out;
-}
-
-// Energy-scale check: for each channel, the stretch s at which channel(E·s) best matches the array sum(E),
-// searched over 0.95–1.05. It is estimated separately in 5 energy windows holding equal shares of the counts,
-// and the median is reported, so one feature that does not move with gain (such as a pile-up where the
-// calibration runs past its last line) cannot dominate. A channel whose calibration agrees with the array reads 0.
-const SCALES = Array.from({ length: 201 }, (_, k) => 0.95 + 0.0005 * k);
-function gainCheck() {
-  if (!S.meta) return {};
-  const states = visibleStates(), lo = S.meta.e_lo, f = Math.max(1, Math.round(S.meta.nbins / 1200));
-  const nb = Math.floor(S.meta.nbins / f), w = S.meta.bin_width * f;  // match line positions on ~1200 bins
-  const smoothLog = a => {  // light smoothing, then log, so strong lines don't swamp weak ones
-    const out = new Float64Array(nb);
-    for (let i = 0; i < nb; i++) {
-      let acc = 0, wt = 0;
-      for (let k = -3; k <= 3; k++) { const j = i + k; if (j < 0 || j >= nb) continue; const g = Math.exp(-k * k / 4.5); acc += g * a[j]; wt += g; }
-      out[i] = Math.log1p(acc / wt);
-    }
-    return out;
-  };
-  const refRaw = rebin(sumAll(null, states), f, 0, nb), ref = smoothLog(refRaw), refTotal = total(refRaw);
-  if (refTotal < 1000) return {};
-  // window edges at 5%, 23%, 41%, 59%, 77%, 95% of the counts
-  const edges = [], targets = [0.05, 0.23, 0.41, 0.59, 0.77, 0.95];
-  for (let i = 0, cum = 0, t = 0; i < nb && t < targets.length; i++) {
-    cum += refRaw[i];
-    while (t < targets.length && cum >= targets[t] * refTotal) { edges.push(i); t++; }
-  }
-  const out = {};
-  for (const ch of S.channels) {
-    const raw = rebin(sumAll([ch], states), f, 0, nb);
-    if (total(raw) < 300) { out[ch] = null; continue; }
-    const c = smoothLog(raw), bests = [];
-    for (let wdx = 0; wdx + 1 < edges.length; wdx++) {
-      const a = edges[wdx], b = edges[wdx + 1];
-      if (b - a < 5) continue;
-      let mean = 0;
-      for (let i = a; i < b; i++) mean += ref[i];
-      mean /= b - a;
-      let best = -Infinity, bestS = 1;
-      for (const sc of SCALES) {
-        let acc = 0;
-        for (let i = a; i < b; i++) {
-          const E = lo + (i + 0.5) * w, x = (E * sc - lo) / w - 0.5, j = Math.floor(x), f = x - j;
-          if (j < 0 || j + 1 >= nb) continue;
-          acc += ((1 - f) * c[j] + f * c[j + 1]) * (ref[i] - mean);
-        }
-        if (acc > best) { best = acc; bestS = sc; }
-      }
-      bests.push(bestS);
-    }
-    bests.sort((x, y) => x - y);
-    out[ch] = bests.length ? bests[Math.floor(bests.length / 2)] - 1 : null;
-  }
   return out;
 }
 
@@ -1196,11 +1093,10 @@ function followSelection(sel) {
   }
   const want = new Set(sel ?? S.stateNames);
   const hidden = S.stateNames.filter(st => !want.has(st));
-  if (hidden.length !== S.hiddenStates.size || hidden.some(st => !S.hiddenStates.has(st))) { S.hiddenStates = new Set(hidden); S.gain = gainCheck(); }
+  S.hiddenStates = new Set(hidden);
 }
 function setHiddenStates(hidden) {
   S.hiddenStates = new Set(hidden);
-  S.gain = gainCheck();
   if (!REPLAY) sendSelection(S.hiddenStates.size ? visibleStates() : null);
   render();
 }
@@ -1258,17 +1154,7 @@ function renderArray() {
     const b = document.createElement("button");
     b.className = "pixel";
     if (!ch) { b.disabled = true; b.style.visibility = "hidden"; grid.appendChild(b); continue; }
-    const p = L[ch], g = S.gain[ch];
-    let colour, value;
-    if (S.metric === "counts") {
-      colour = rampAt(RAMP, floor + (1 - floor) * cfrac(counts[ch]));
-      value = `${fmtRate(rate(ch))}/s`;
-    } else if (g == null) {
-      colour = [184, 192, 196]; value = "too few";
-    } else {
-      colour = rampAt(DIVERGING, 0.5 + g / 0.06);  // ±3% spans the scale
-      value = fmt.pct(100 * g);
-    }
+    const p = L[ch], colour = rampAt(RAMP, floor + (1 - floor) * cfrac(counts[ch])), value = `${fmtRate(rate(ch))}/s`;
     b.style.setProperty("--cell", rgb(colour));
     b.style.setProperty("--cell-ink", inkOn(colour));
     b.style.setProperty("--sel", S.overlay.includes(ch) ? overlayColour(ch) : "transparent");
@@ -1280,29 +1166,21 @@ function renderArray() {
     grid.appendChild(b);
   }
   const key = document.getElementById("gridKey"), note = document.getElementById("metricNote");
-  if (S.metric === "counts") {
-    key.innerHTML = `<span>0</span><i style="background:linear-gradient(90deg,${[0, .25, .5, .75, 1].map(f => rgb(rampAt(RAMP, floor + (1 - floor) * f))).join(",")})"></i><span>${fmtRate(cmax / expo)} good pulses/s</span>`;
-    note.textContent = "Good pulses per second of measurement for each channel, in the states selected above the spectrum. "
-      + "Copies at a different gain differ slightly from the channel they copy: a few pulses fall on the other side of their recipe's cuts or the energy range.";
-  } else {
-    key.innerHTML = `<span>−3%</span><i style="background:linear-gradient(90deg,${DIVERGING.map(rgb).join(",")})"></i><span>+3%</span>`;
-    note.textContent = "Energy-scale check: how much each channel's spectrum is stretched relative to the whole array, found by matching "
-      + "line positions. 0% means the channel's calibration agrees with the array. The copies simulated at a different gain have "
-      + "recipes of their own, learned from their own pulses, so they agree too.";
-  }
+  key.innerHTML = `<span>0</span><i style="background:linear-gradient(90deg,${[0, .25, .5, .75, 1].map(f => rgb(rampAt(RAMP, floor + (1 - floor) * f))).join(",")})"></i><span>${fmtRate(cmax / expo)} good pulses/s</span>`;
+  note.textContent = "Good pulses per second of measurement for each channel, in the states selected above the spectrum. "
+    + "Copies at a different gain differ slightly from the channel they copy: a few pulses fall on the other side of their recipe's cuts or the energy range.";
   renderDetail(counts);
 }
 
 function renderDetail(counts) {
   const box = document.getElementById("pixelDetail"), ch = S.detail, L = layout();
   if (!ch || !L[ch]) { box.innerHTML = `<span class="muted">Tap a channel to see its details here.</span>`; return; }
-  const p = L[ch], g = S.gain[ch];
+  const p = L[ch];
   const kind = p.copy_of == null ? "Real detector channel" : `Simulated copy of channel ${p.copy_of}`;
   box.innerHTML = `<dl>
     <dt>Channel</dt><dd><b>${ch}</b> at column ${p.x + 1}, row ${p.y + 1}</dd>
-    <dt>What it is</dt><dd>${kind}${p.copy_of == null ? "" : `, analysed with channel ${p.copy_of}'s recipe`}</dd>
+    <dt>What it is</dt><dd>${kind}${p.copy_of == null ? "" : p.gain === 1 ? `, analysed with channel ${p.copy_of}'s recipe` : ", analysed with a recipe learned from its own pulses"}</dd>
     <dt>Good pulses</dt><dd>${fmt.int(counts[ch])} (${fmtRate(counts[ch] / (exposureS(visibleStates()) || 1))} per second)</dd>
-    <dt>Energy scale</dt><dd>${g == null ? "needs at least 300 good pulses" : `${fmt.pct(100 * g)} relative to the array`}</dd>
     ${p.copy_of == null ? "" : `<dt>Simulated gain</dt><dd>${fmt.pct(100 * (p.gain - 1))} in pulse height</dd>`}
   </dl>`;
 }
@@ -1417,9 +1295,8 @@ function renderPipeline() {
     ? `↻ last poll took ${fmt.ms(Object.values(lp.step_ms).reduce((a, b) => a + b, 0))}, then waits and polls again`
     : `↻ then waits until ${S.meta.poll_s ?? 0.5} s after the poll began, and polls again`;
   setFile("f-output", `<span><b>${fmt.int(st.chunks)}</b> batches</span><span><b>${fmt.int(st.records)}</b> records</span>`);
-  setFile("f-hist", `<span><b>${fmt.int(S.nDone)}</b> finished slices of ${fmtDuration(meta.slice_s)}</span>`);
-  const open = S.current.reduce((n, r) => n + Object.values(r.stateSum).reduce((a, v) => a + total(v), 0), 0);
-  setFile("f-current", `<span><b>${fmt.int(open)}</b> good pulses so far</span>`);
+  setFile("f-hist", `<span><b>${fmt.int(S.nSlices)}</b> finished slices of ${fmtDuration(meta.slice_s)}</span>`);
+  setFile("f-current", `<span><b>${fmt.int(S.openGood)}</b> good pulses so far</span>`);
   setFile("f-states", `<span><b>${fmt.int(S.timeline.length)}</b> state changes</span>`);
   setFile("f-status", `<span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.int(st.good_pulses)}</b> good pulses</span>`);
   const fits = S.fits?.fits || [], lastFit = fits.at(-1);
@@ -1446,7 +1323,7 @@ function renderPipeline() {
   for (const [id, b] of Object.entries(sizes)) if (b != null) document.querySelector(`#${id} .stats`).insertAdjacentHTML("beforeend", `<span><b>${fmtGB(b)}</b></span>`);
   document.getElementById("viewWhat").textContent = REPLAY
     ? "Plays the recording back one recorded poll at a time, as if reading the files above."
-    : `Asks the viewer server for anything new every ${POLL_MS / 1000} s.`;
+    : `Asks the viewer server every ${POLL_MS / 1000} s for what it draws, and keeps nothing between answers but your choices.`;
 }
 
 // Light the loop's steps in order, and the files each step writes.
@@ -1475,21 +1352,20 @@ function animateLoop(lp) {
 let geometry = null;
 // ---- resident memory (RSS) of each process involved, sampled by the server every 2 s (live server only)
 const fmtGB = b => b >= 1e6 ? `${(b / 1e9).toFixed(b >= 1e8 ? 2 : 3)} GB` : "< 0.001 GB";
-const fmtBytes = b => b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.round(b / 1e6)} MB`;
-const PROC_BOX = { "mass2-live-sim": "p-sim", "mass2-live-apply": "p-apply", "mass2-live-fit": "p-fit" };
+const PROC_BOX = { "mass2-live-sim": "p-sim", "mass2-live-apply": "p-apply", "mass2-live-fit": "p-fit", "mass2-live-demo": "p-server", "mass2-live-view": "p-server" };
 function renderMemory() {
   const el = document.getElementById("memory"), P = S.processes;
   el.hidden = !P?.length;
   if (P?.length) {
     const sum = P.reduce((a, p) => a + p.rss_bytes, 0);
-    el.innerHTML = `Memory in use (resident): ${P.map(p => `${escapeHtml(p.name)} <b>${fmtBytes(p.rss_bytes)}</b>`).join(" · ")} · total <b>${fmtBytes(sum)}</b>`;
+    el.innerHTML = `Memory in use (resident): ${P.map(p => `${escapeHtml(p.name)} <b>${fmt.bytes(p.rss_bytes)}</b>`).join(" · ")} · total <b>${fmt.bytes(sum)}</b>`;
   }
-  for (const [name, id] of Object.entries(PROC_BOX)) {
-    const box = document.querySelector(`#${id} .name`), p = P?.find(q => q.name === name);
+  for (const id of new Set(Object.values(PROC_BOX))) {
+    const box = document.querySelector(`#${id} .name`), p = P?.find(q => PROC_BOX[q.name.split(" ")[0]] === id);
     let tag = box.querySelector(".mem");
     if (!p) { tag?.remove(); continue; }
     if (!tag) { tag = document.createElement("span"); tag.className = "mem"; box.append(tag); }
-    tag.textContent = ` · ${fmtBytes(p.rss_bytes)} in memory`;
+    tag.textContent = ` · ${fmt.bytes(p.rss_bytes)} in memory`;
   }
 }
 
@@ -1532,7 +1408,7 @@ function setupRowChoice() {
     const b = document.createElement("button");
     b.textContent = label;
     b.title = secs == null ? "Rows fill in about 12 s of wall time at the current playback speed" : `Each row holds ${label} of data`;
-    b.onclick = () => { S.rowChoice = secs; showRowChoice(); render(); };
+    b.onclick = () => { S.rowChoice = secs; showRowChoice(); poll(); };  // rows of the new length, now
     seg.append(b);
   }
   showRowChoice();
@@ -1552,14 +1428,6 @@ document.getElementById("sumBtn").onclick = () => setEachState(false);
 document.getElementById("eachBtn").onclick = () => setEachState(true);
 document.getElementById("logBtn").onclick = () => setLog(true);
 document.getElementById("linBtn").onclick = () => setLog(false);
-for (const [id, metric] of [["mCounts", "counts"], ["mGain", "gain"]]) {
-  document.getElementById(id).onclick = () => {
-    S.metric = metric;
-    document.getElementById("mCounts").setAttribute("aria-pressed", metric === "counts");
-    document.getElementById("mGain").setAttribute("aria-pressed", metric === "gain");
-    render();
-  };
-}
 
 function eAt(canvas, clientX) {
   const m = margins(canvas.id), rect = canvas.getBoundingClientRect(), pw = rect.width - m.left - m.right;

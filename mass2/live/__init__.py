@@ -6,8 +6,9 @@ The core, which a real instrument uses:
     histogram.py      per-channel, per-state energy histograms in fixed time slices
     apply_recipe.py   mass2-live-apply: the loop that applies the recipe and writes results and histograms
     fit.py            mass2-live-fit: refits one line on the summed histograms, in its own process
+    parent.py         a tool started by a demo exits when that demo is gone
 
 Built on the core, kept separate:
     viewer/           mass2-live-view: the web page and its server
-    demo/             mass2-live-demo and mass2-live-export: simulator, demo datasets, launcher, shareable page
+    demo/             mass2-live-demo and mass2-live-export: simulator, demo datasets, a run per visitor, shareable page
 """

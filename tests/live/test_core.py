@@ -4,10 +4,16 @@
 2. Applying a saved recipe live gives exactly what mass2 gives offline.
 3. Every good pulse lands in exactly one time slice, and output chunks match input chunks.
 4. The live line fit finds a line the way Channel.linefit would.
+5. The line fit follows the states selected in the viewer.
+6. A tool exits when the demo that started it is gone.
 """
 
 import json
+import os
+import subprocess
+import sys
 import threading
+import time
 
 import numpy as np
 import polars as pl
@@ -20,7 +26,7 @@ from mass2.live.apply_recipe import LiveRecipeApplier, run_live
 from mass2.live.demo import simulate
 from mass2.live.demo.datasets import DATASETS
 from mass2.live.fit import LiveFitter
-from mass2.live.histogram import NO_STATE, HistogramSpec
+from mass2.live.histogram import NO_STATE, HistogramSlice, HistogramSpec
 
 BESSY = DATASETS["bessy_20240727"]
 PULSE_FOLDER = pulsedata.pulse_noise_ljh_pairs["bessy_20240727"].pulse_folder
@@ -102,3 +108,44 @@ def test_4_line_fit_finds_the_line():
     assert entry["peak"][0] == pytest.approx(600, abs=0.1)
     assert entry["fwhm"][0] == pytest.approx(6, rel=0.05)
     assert png.startswith(b"\x89PNG")  # drawn by LineModelResult.plotm()
+
+
+def test_5_the_fit_follows_the_selected_states():
+    spec = HistogramSpec(e_lo=0, e_hi=1200, bin_width=0.25, slice_s=10)
+    rng = np.random.default_rng(0)
+
+    def line(e0):  # a 6 eV wide line at e0
+        return np.histogram(rng.normal(e0, 6 / 2.355, 20000), bins=spec.nbins, range=(0, 1200))[0]
+
+    fitter = LiveFitter(spec, DATASETS["bessy_20240727"].roi)
+    fitter.add(histogram.slices_to_df([HistogramSlice(0, spec.nbins, {(1, "CAL2"): line(600), (1, "SCAN3"): line(603)})]))
+    fitter.fit()
+    assert fitter.select(["CAL2"]) and fitter.fits == []  # a new selection starts a new series of fits
+    entry, _ = fitter.fit()
+    assert entry["states"] == ["CAL2"] and entry["peak"][0] == pytest.approx(600, abs=0.1)
+    assert not fitter.select(["CAL2"])
+    fitter.select(["SCAN3"])
+    assert fitter.fit()[0]["peak"][0] == pytest.approx(603, abs=0.1)
+
+
+def test_6_a_tool_exits_when_the_demo_that_started_it_is_gone(tmp_path):
+    tool, demo = tmp_path / "tool.py", tmp_path / "demo.py"  # a stand-in demo that starts one tool and is then killed
+    tool.write_text("import time\nfrom mass2.live.parent import exit_with_parent\nexit_with_parent(0.05)\ntime.sleep(30)\n")
+    demo.write_text(
+        "import os, subprocess, sys, time\n"
+        f"p = subprocess.Popen([sys.executable, {str(tool)!r}], env=os.environ | {{'MASS2_LIVE_PARENT_PID': str(os.getpid())}})\n"
+        "print(p.pid, flush=True)\ntime.sleep(30)\n"
+    )
+    parent = subprocess.Popen([sys.executable, str(demo)], stdout=subprocess.PIPE, text=True)
+    child = int(parent.stdout.readline())
+    parent.kill()
+    parent.wait()
+    for _ in range(100):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child, 9)
+        raise AssertionError("the tool outlived its demo")

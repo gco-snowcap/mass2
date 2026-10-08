@@ -1,29 +1,30 @@
-"""Run the whole live pipeline on `pulsedata` datasets, switchable from the viewer.
+"""Run the whole live pipeline on `pulsedata` datasets, a run for each visitor, switchable from the viewer.
 
-For the chosen dataset (see `datasets.py`):
+Each visitor gets a run of their own (see `visitors.py`). For the run's dataset (see `datasets.py`):
 1. Start `mass2-live-sim`, replaying the LJH data (and its experiment states) into a growing stream, plus
    gain-shifted fake channels.
 2. Start `mass2-live-apply` on that stream with the dataset's saved recipe (mass2/live/recipes/<key>.pkl).
    Fake channels at a different gain have recipes of their own in it; exact copies borrow their source channel's.
 3. Start `mass2-live-fit`, refitting the line the original analysis fitted, on all channels summed.
-The viewer is served from this process. Picking another dataset in the page stops 1 and 2 and restarts them.
-The data are replayed again and again, continuing the timeline, so the run goes on across passes and a change
-of playback speed never interrupts it. Only when the run's files reach `--max-gb` does it start over from
-empty files, so the disk never holds more than that.
+The viewer is served from this process. Picking another dataset in the page stops the run's tools and starts
+them on it. The data are replayed again and again, continuing the timeline, so a run goes on across passes
+and a change of playback speed never interrupts it; only when its files reach `--max-gb` does it start over.
 
 Each pipeline tool runs as its own process, exactly as it would from the command line, and exits if the demo
 is gone. A run whose tool fails is started over. Ctrl-C stops them all.
 
-By default every viewer shares one run. With `--visitors N`, each visitor gets a run of their own at an
-address of its own (see `visitors.py`), at most N at once.
+Command line:  mass2-live-demo [WORKDIR] [--dataset bessy_20240727] [--speed 5] [--max-gb 4] [--max-runs 8]
+                               [--idle 180] [--lan] [--port 8765] [--public]
 
-Command line:  mass2-live-demo [WORKDIR] [--dataset bessy_20240727] [--speed 5] [--max-gb 20] [--visitors N]
-                               [--lan] [--port 8765]
+Everything is local by default. With --public it is also served on the internet through a Cloudflare quick
+tunnel, if cloudflared is installed, and the public address is printed.
 """
 
 import argparse
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -31,13 +32,15 @@ import threading
 import time
 import webbrowser
 from collections.abc import Sequence
+from typing import IO
 from pathlib import Path
 
 from .datasets import DATASETS, DemoDataset
 from .simulate import state_file_path
 from ..fit import read_selected_states, write_selected_states
 from ..parent import PARENT_ENV
-from ..viewer.server import HistogramStore, start_router_server, start_server, viewer_urls
+from ..viewer.server import HistogramStore, start_router_server, viewer_urls
+from .visitors import VisitorRuns
 
 MIN_SPEED, MAX_SPEED = 1.0, 600.0  # the viewer's playback-speed slider runs 1x to 600x real time
 
@@ -45,13 +48,13 @@ MIN_SPEED, MAX_SPEED = 1.0, 600.0  # the viewer's playback-speed slider runs 1x 
 class DemoController:
     """Owns the simulator and applier processes for one dataset at a time."""
 
-    def __init__(self, workdir: Path, store: HistogramStore, repeats: int = 0, sim_extra: Sequence[str] = ()):
+    def __init__(self, workdir: Path, store: HistogramStore, repeats: int = 0, sim_extra: Sequence[str] = (), speed: float = 5.0):
         self.workdir = workdir
         self.store = store
         self.repeats = repeats
         self.sim_extra = list(sim_extra)  # e.g. ["--max-pulses", "2000"] in tests
         self.active: str | None = None
-        self.speed = 5.0  # playback speed, multiples of real time; the simulator re-reads it before every chunk
+        self.speed = speed  # playback speed, multiples of real time; the simulator re-reads it before every chunk
         self.phase = "starting"
         self._procs: dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
@@ -195,55 +198,60 @@ def pipeline_processes(dataset: DemoDataset, run_dir: Path, repeats: int, sim_ex
     }
 
 
+def public_tunnel(port: int) -> subprocess.Popen:
+    """Start a Cloudflare quick tunnel to the local viewer and print its public address (a new one each time)."""
+    proc = subprocess.Popen(
+        ["cloudflared", "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", f"http://127.0.0.1:{port}"],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    def follow(stream: IO[str]) -> None:  # print the address once, and keep reading so cloudflared never blocks
+        shown = False
+        for line in stream:
+            if not shown and (m := re.search(r"https://[-a-z0-9]+\.trycloudflare\.com", line)):
+                print(f"mass2-live-demo: public address {m.group(0)}", flush=True)
+                shown = True
+
+    assert proc.stderr is not None
+    threading.Thread(target=follow, args=(proc.stderr,), daemon=True).start()
+    return proc
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Entry point for `mass2-live-demo`."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "workdir", type=Path, nargs="?", default=Path("mass2_live_demo"), help="output directory (default ./mass2_live_demo)"
     )
-    p.add_argument("--dataset", choices=sorted(DATASETS), default="bessy_20240727", help="dataset to start with")
-    p.add_argument(
-        "--repeats", type=int, default=0,
-        help="passes over the data in one run, after which the run starts over (default 0: replay without end)",
-    )
-    p.add_argument(
-        "--max-gb", type=float, default=None,
-        help="start a run over when its files reach this size, GB (default 20; 4 per run with --visitors)",
-    )
-    p.add_argument(
-        "--speed", type=float, default=5.0, help="starting playback speed, multiples of real time (default 5); change it in the page"
-    )
-    p.add_argument(
-        "--visitors", type=int, default=0, metavar="N",
-        help="give each visitor a run of their own, at most N at once (default 0: one run, shared by every viewer)",
-    )
-    p.add_argument("--idle", type=float, default=180, help="with --visitors: stop a run nobody has viewed for this long, seconds (default 180)")
+    p.add_argument("--dataset", choices=sorted(DATASETS), default="bessy_20240727", help="dataset a new run starts with")
+    p.add_argument("--speed", type=float, default=5.0, help="playback speed a new run starts at, multiples of real time (default 5)")
+    p.add_argument("--repeats", type=int, default=0, help="passes over the data in a run before it starts over (default 0: no end)")
+    p.add_argument("--max-gb", type=float, default=4.0, help="start a run over when its files reach this size, GB (default 4)")
+    p.add_argument("--max-runs", type=int, default=8, help="runs at once, one per visitor (default 8)")
+    p.add_argument("--idle", type=float, default=180, help="stop a run nobody has viewed for this long, seconds (default 180)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--lan", action="store_true", help="serve the viewer to other devices on this network, e.g. a phone")
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument(
+        "--public", action="store_true", help="also serve it on the internet: a Cloudflare quick tunnel (needs cloudflared)"
+    )
     args = p.parse_args(argv)
-    max_gb = args.max_gb if args.max_gb is not None else (4.0 if args.visitors else 20.0)
+    if args.public and shutil.which("cloudflared") is None:
+        p.error(
+            "--public needs cloudflared on the PATH (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)"
+        )
 
     args.workdir.mkdir(parents=True, exist_ok=True)
+    runs = VisitorRuns(
+        args.workdir, lambda run_dir, store: DemoController(run_dir, store, args.repeats, speed=args.speed),
+        max_runs=args.max_runs, dataset=args.dataset, idle_s=args.idle,
+    )  # fmt: skip
     host = "0.0.0.0" if args.lan else "127.0.0.1"
-    if args.visitors:
-        from .visitors import VisitorRuns  # noqa: PLC0415
-
-        runs = VisitorRuns(args.workdir, max_runs=args.visitors, dataset=args.dataset, speed=args.speed, repeats=args.repeats, idle_s=args.idle)
-        server, port = start_router_server(runs, args.port, host)
-        keep_going, stop = (lambda: runs.tick(max_gb)), runs.stop_all
-    else:
-        store = HistogramStore(args.workdir / args.dataset / "hist")
-        controller = DemoController(args.workdir, store, args.repeats)
-        controller.speed = args.speed
-        server, port = start_server(store, args.port, host, controller)
-        controller.switch(args.dataset)
-        keep_going, stop = (lambda: controller.maintain(max_gb)), controller.stop
-
+    server, port = start_router_server(runs, args.port, host)
     urls = viewer_urls(host, port)
     print(f"mass2-live-demo: viewer at {'  '.join(urls)}  (Ctrl-C to stop)", flush=True)
-    if args.lan:
-        print("mass2-live-demo: open the first address on a phone on the same network.", flush=True)
+    tunnel = public_tunnel(port) if args.public else None
     if not args.no_browser:
         webbrowser.open(urls[-1])
 
@@ -251,12 +259,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         while True:
-            keep_going()
+            runs.tick(args.max_gb)
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
-        stop()
+        if tunnel is not None:
+            tunnel.terminate()
+        runs.stop_all()
         server.shutdown()
 
 
