@@ -13,8 +13,8 @@ can be changed while running through --speed-file. With `repeats` the data are r
 continuing the timeline. If the data have an experiment-state
 file, its state changes are replayed on the same timeline into OUT_experiment_state.txt, each line appended
 just before the first chunk that follows it, as DASTARD would. A `ScaledChannel` adds a fake channel
-whose pulses are a source channel's pulses with the signal multiplied by a constant, so a recipe borrowed
-from the source channel will be off in gain by that factor.
+whose pulses are a source channel's pulses with the signal multiplied by a constant, as a detector of a
+different gain would record them; it needs a recipe of its own to come out at the right energies.
 
 Command line:  mass2-live-sim OUT.arrows [--ljh-folder DIR] [--repeats N] [--speed X] [--scale 4219:14219:1.03]
                [--no-states]

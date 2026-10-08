@@ -1101,12 +1101,12 @@ function renderArray() {
   if (S.metric === "counts") {
     key.innerHTML = `<span>0</span><i style="background:linear-gradient(90deg,${[0, .25, .5, .75, 1].map(f => rgb(rampAt(RAMP, floor + (1 - floor) * f))).join(",")})"></i><span>${fmtRate(cmax / expo)} good pulses/s</span>`;
     note.textContent = "Good pulses per second of measurement for each channel, in the states included below the spectrum. "
-      + "Copies differ slightly from the channel they copy: at a different gain, a few pulses fall on the other side of the recipe's cuts or the energy range.";
+      + "Copies at a different gain differ slightly from the channel they copy: a few pulses fall on the other side of their recipe's cuts or the energy range.";
   } else {
     key.innerHTML = `<span>−3%</span><i style="background:linear-gradient(90deg,${DIVERGING.map(rgb).join(",")})"></i><span>+3%</span>`;
     note.textContent = "Energy-scale check: how much each channel's spectrum is stretched relative to the whole array, found by matching "
-      + "line positions. 0% means the channel's calibration agrees with the array. The copies simulated with a wrong gain stand out; "
-      + "their energy error is larger than their gain error because the calibration curve bends.";
+      + "line positions. 0% means the channel's calibration agrees with the array. The copies simulated at a different gain have "
+      + "recipes of their own, learned from their own pulses, so they agree too.";
   }
   renderDetail(counts);
 }
@@ -1219,8 +1219,8 @@ function renderPipeline() {
   setFile("f-input", `<span><b>${fmt.int(st.chunks)}</b> chunks</span><span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.bytes(st.input_bytes)}</b></span>`);
   setFile("f-statesfile", `<span><b>${fmt.int(S.timeline.length)}</b> state changes</span>`);
   document.getElementById("applyWhat").textContent =
-    REPLAY ? `This recording was made in steps of ${fmtDuration(meta.fine_s)} of data; each playback step lights the loop once. Copies use their real channel's recipe.`
-           : `Polls the stream every ${meta.poll_s ?? 0.5} s. ${fmt.int(st.polls)} polls so far. Copies use their real channel's recipe.`;
+    REPLAY ? `This recording was made in steps of ${fmtDuration(meta.fine_s)} of data; each playback step lights the loop once. Copies at a different gain use recipes of their own; exact copies use their real channel's.`
+           : `Polls the stream every ${meta.poll_s ?? 0.5} s. ${fmt.int(st.polls)} polls so far. Copies at a different gain use recipes of their own; exact copies use their real channel's.`;
   document.getElementById("recipeSteps").textContent =
     `Run the saved steps on each channel's new pulses: ${(meta.recipe_steps || []).map(s => s.replace(/Step$/, "")).join(" → ")}, `
     + `giving ${meta.energy_col} and a good/bad flag.`;

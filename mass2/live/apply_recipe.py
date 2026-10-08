@@ -84,7 +84,7 @@ def run_live(
 class LiveRecipeApplier:
     """Apply per-channel recipes to multi-channel DataFrames of raw records.
 
-    `aliases` maps a channel number with no recipe of its own to a channel whose recipe it should borrow.
+    `aliases` maps a channel number to a channel whose recipe it borrows when it has no recipe of its own.
     Rows of channels with no recipe at all pass through with null outputs and `good = False`.
     """
 
@@ -98,7 +98,7 @@ class LiveRecipeApplier:
         df = df.with_row_index("_row")
         parts = []
         for (ch_num,), df_ch in df.partition_by("ch_num", as_dict=True, maintain_order=True).items():
-            recipe = self.recipes.get(self.aliases.get(ch_num, ch_num))
+            recipe = self.recipes.get(ch_num, self.recipes.get(self.aliases.get(ch_num, ch_num)))
             if recipe is None:
                 self.channels_without_recipe.add(ch_num)
                 parts.append(df_ch.drop("pulse").with_columns(good=pl.lit(False)))

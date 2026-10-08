@@ -3,8 +3,8 @@
 For the chosen dataset (see `datasets.py`):
 1. Start `mass2-live-sim`, replaying the LJH data (and its experiment states) into a growing stream, plus
    gain-shifted fake channels.
-2. Start `mass2-live-apply` on that stream with the dataset's saved recipe (mass2/live/recipes/<key>.pkl),
-   giving each fake channel its source channel's recipe.
+2. Start `mass2-live-apply` on that stream with the dataset's saved recipe (mass2/live/recipes/<key>.pkl).
+   Fake channels at a different gain have recipes of their own in it; exact copies borrow their source channel's.
 3. Start `mass2-live-fit`, refitting the line the original analysis fitted, on all channels summed.
 The viewer is served from this process. Picking another dataset in the page stops 1 and 2 and restarts them.
 

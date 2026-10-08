@@ -10,7 +10,7 @@ import argparse
 import os
 from collections.abc import Callable, Sequence
 from importlib import resources
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,8 @@ import pulsedata
 import mass2
 from ..fit import RoiFit
 from ..histogram import HistogramSpec
-from .simulate import ScaledChannel
+from mass2.core.misc import PulseDataFromNumpy
+from .simulate import ScaledChannel, scale_pulses
 
 
 @dataclass(frozen=True)
@@ -37,8 +38,8 @@ class Pixel:
 def detector_array(nx: int, ny: int, numbers: Sequence[int], real: Sequence[int], off: dict[int, float]) -> tuple[Pixel, ...]:
     """An nx by ny array; `numbers` are channel numbers in row order, `real` the ones with real data.
 
-    Every other pixel is an exact copy of a real channel (gain 1), except the pixels in `off`, whose gains
-    are deliberately wrong so the energy-scale check has something to find.
+    Every other pixel is an exact copy of a real channel (gain 1), except the pixels in `off`, recorded at a
+    different gain, as real detectors are; each of those gets its own recipe, which corrects it.
     """
     assert len(numbers) == nx * ny and set(real) <= set(numbers)
     pixels = []
@@ -175,10 +176,26 @@ DATASETS: dict[str, DemoDataset] = {
 }
 
 
+def gain_copy(ch: mass2.Channel, ch_num: int, gain: float) -> mass2.Channel:
+    """Channel `ch` as recorded by a detector of a different gain: the same pulses `mass2-live-sim` writes for
+    the copy, as a Channel its own recipe can be learned from."""
+    assert ch.pulseframer is not None, f"channel {ch.header.ch_num} has no raw pulses"
+    pulses = ch.pulseframer.load_raw_chunk(0, ch.npulses)["pulse"].to_numpy()
+    framer = PulseDataFromNumpy(scale_pulses(pulses, gain, ch.header.n_presamples))
+    return replace(ch, header=replace(ch.header, ch_num=ch_num), pulseframer=framer)
+
+
 def build_recipe(dataset: DemoDataset, path: str | Path) -> None:
-    """Learn `dataset`'s analysis on its full LJH data and save the recipe that produces its energy column."""
+    """Learn `dataset`'s analysis on its full LJH data and save the recipe that produces its energy column.
+
+    Each copy at a wrong gain gets a recipe of its own, learned the same way from its own scaled pulses, so its
+    calibration absorbs the gain and its energies agree with the real channels'. Copies at gain 1 are exact
+    copies; they borrow their source channel's recipe.
+    """
     path = Path(path)
     data = mass2.Channels.from_ljh_folder(dataset.pulse_folder, dataset.noise_folder).with_experiment_state_by_path()
+    copies = {p.ch_num: gain_copy(data.channels[p.source_ch], p.ch_num, p.gain) for p in dataset.pixels if p.source_ch is not None and p.gain != 1.0}
+    data = replace(data, channels=data.channels | copies)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     data.map(dataset.learn).save_recipes(str(tmp), required_fields=dataset.energy_col)
     os.replace(tmp, path)  # a concurrent reader never sees a half-written recipe
