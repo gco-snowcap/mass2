@@ -949,7 +949,7 @@ function drawSpectrum() {
   }).filter(c => c.secs > 0);
   const yfloor = 0.5 * perS;  // half a count, as a rate: the bottom of the log axis
   let ymax = 2 * yfloor;
-  for (const arr of [sum, ...overlays.map(o => o.data)]) for (const v of arr) ymax = Math.max(ymax, v);
+  for (const arr of [...(S.eachState ? [] : [sum]), ...overlays.map(o => o.data)]) for (const v of arr) ymax = Math.max(ymax, v);
   // a state's rates set the axis only where they are measured to better than 1σ, so a lone count in a short state cannot stretch it
   for (const c of perState) for (let k = 0; k < c.data.length; k++) ymax = Math.max(ymax, c.data[k] - c.sigma[k]);
   ymax *= 1.15;
@@ -986,8 +986,10 @@ function drawSpectrum() {
     ctx.fillStyle = MUTED; ctx.textAlign = "left"; ctx.textBaseline = "top";
     ctx.fillText("fit region", Math.max(xa + 3, m.left + 3), m.top + 3);
   }
-  stepPath(sum); ctx.fillStyle = css("--sum-fill"); ctx.fill();
-  if (!S.eachState) { ctx.strokeStyle = INK; ctx.lineWidth = 1.25; ctx.stroke(); }
+  if (!S.eachState) {  // the sum; in "each in its colour" only the states themselves are drawn
+    stepPath(sum); ctx.fillStyle = css("--sum-fill"); ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.25; ctx.stroke();
+  }
   for (const c of perState) {  // the ±1σ band, then the rate
     const lo = c.data.map((v, k) => v - c.sigma[k]), hi = c.data.map((v, k) => v + c.sigma[k]);
     ctx.beginPath();
@@ -1004,8 +1006,7 @@ function drawSpectrum() {
   document.getElementById("specDesc").textContent = S.eachState
     ? `Good pulses from all ${S.channels.length} channels, each selected state in the colour of its button below, as pulses per second spent in that state `
       + `(${perState.map(c => `${c.st === NO_STATE ? "before start" : c.st} ${fmtDuration(c.secs)}, ${fmt.int(c.n)} pulses`).join("; ") || "none selected"}), so states of different lengths compare directly. `
-      + `Each shaded band is ±1σ from counting statistics (√counts over the same seconds): wide for a short state. The counts axis covers what is measured to better than 1σ. `
-      + `The grey fill is the sum of the selected states, per second of all of them.`
+      + `Each shaded band is ±1σ from counting statistics (√counts over the same seconds): wide for a short state. The counts axis covers what is measured to better than 1σ.`
     : `Good pulses from all ${S.channels.length} channels, summed, ${which}: ${fmt.int(sumTotal)} pulses in ${fmtDuration(expo)} of measurement `
       + `(${fmtRate(sumTotal / expo)} per second). Rates are per second of the original measurement, so playback speed does not change them.`;
   const finest = f === 1;
@@ -1544,8 +1545,8 @@ function readout(canvas, e) {
   if (k < 0 || k >= (canvas.id === "spectrum" ? geo.sum.length : geo.lines[0]?.length ?? 0)) return;
   const big = bigEnergy(), binTxt = `${fmt.energy(meta.e_lo + j * dw, big)} to ${fmt.energy(meta.e_lo + (j + 1) * dw, big)}`;
   if (canvas.id === "spectrum") {
-    let text = `Bin ${binTxt}: ${fmtRate(geo.sum[k])} good pulses per second (all channels)`;
-    for (const c of geo.perState) text += `; ${c.st === NO_STATE ? "before start" : c.st}: ${fmtRate(c.data[k])} ± ${fmtRate(c.sigma[k])}/s`;
+    let text = geo.perState.length ? `Bin ${binTxt}, good pulses per second in each state (all channels)` : `Bin ${binTxt}: ${fmtRate(geo.sum[k])} good pulses per second (all channels)`;
+    for (const c of geo.perState) text += `${c === geo.perState[0] ? ": " : "; "}${c.st === NO_STATE ? "before start" : c.st}: ${fmtRate(c.data[k])} ± ${fmtRate(c.sigma[k])}/s`;
     for (const o of geo.overlays) text += `; ch ${o.ch} scaled: ${fmtRate(o.data[k])}/s`;
     document.getElementById("specReadout").textContent = text;
   } else {
