@@ -462,7 +462,7 @@ async function poll() {
   try {
     const rowS = S.meta ? rowLength() : 0;
     const since = S.baseRowS != null && S.baseRowS !== rowS ? 0 : S.nDone;  // a new row length: ask for a new base
-    const s = REPLAY ? REPLAY.state(since) : await (await fetch(`api/state?since=${since}&row_s=${rowS}`, { cache: "no-store" })).json();
+    const s = REPLAY ? REPLAY.state(since) : await fetchState(since, rowS);
     if (s.run !== S.run) {
       resetData(s.run);
       if (since > 0) { setTimeout(poll, 0); return; }  // a new run: ask again from the start
@@ -474,12 +474,43 @@ async function poll() {
   setTimeout(poll, POLL_MS);
 }
 
+// ---- the live server's answer: an Arrow IPC stream, one row per histogram (kind, t, state, ch_num, and its
+// nonempty bins and their counts), with everything else as JSON in the schema metadata. It is turned into the
+// shapes a recording holds, with each histogram as {bins, counts} typed arrays read straight from the stream.
+const ARROW = REPLAY ? null : new Promise((ok, fail) => {
+  const el = document.createElement("script");
+  el.src = "arrow.js"; el.onload = ok; el.onerror = fail;
+  document.head.append(el);
+});
+async function fetchState(since, rowS) {
+  await ARROW;
+  const res = await fetch(`api/state?since=${since}&row_s=${rowS}`, { cache: "no-store" });
+  const table = Arrow.tableFromIPC(new Uint8Array(await res.arrayBuffer()));
+  const s = JSON.parse(table.schema.metadata.get("mass2.live"));
+  const col = name => table.getChild(name);
+  const [kind, t, state, ch, bins, counts] = ["kind", "t", "state", "ch_num", "bins", "counts"].map(col);
+  const groups = { total: new Map(), row: new Map(), slice: new Map(), open: new Map() };
+  for (let i = 0; i < table.numRows; i++) {
+    const g = groups[kind.get(i)], key = t.get(i) ?? 0;
+    if (!g.has(key)) g.set(key, { t: key, counts: {} });
+    ((g.get(key).counts[state.get(i)] ??= {})[String(ch.get(i))] = { bins: bins.get(i).toArray(), counts: counts.get(i).toArray() });
+  }
+  s.slices = [...groups.slice.values()];
+  s.current = [...groups.open.values()];
+  s.base = s.base ? { totals: groups.total.get(0)?.counts ?? {}, row_s: s.row_s, rows: [...groups.row.values()] } : null;
+  return s;
+}
+
 // Slices arrive sparse: {t, counts: {state: {channel: [bin gap, count, ...]}}}. Each finished slice is added once
 // into running totals (for the spectrum and the map) and kept sparse (for the time plot) until its row is
 // built. The slice still filling (live server only) is decoded fresh on each update. A page starting, or far
 // behind, gets a `base` from the live server instead: the totals so far and the newest time-plot rows.
 const T = { byState: {}, stateSum: {} };
-function decodeInto(target, pairs) { for (let q = 0, i = 0; q < pairs.length; q += 2) { i += pairs[q]; target[i] += pairs[q + 1]; } }
+function decodeInto(target, h) {  // h: {bins, counts} from the live server, or [bin gap, count, ...] from a recording
+  if (Array.isArray(h)) { for (let q = 0, i = 0; q < h.length; q += 2) { i += h[q]; target[i] += h[q + 1]; } return; }
+  const { bins, counts } = h;
+  for (let k = 0; k < bins.length; k++) target[bins[k]] += counts[k];
+}
 function addToTotals(counts) {
   const nb = S.meta.nbins;
   for (const [st, chans] of Object.entries(counts)) for (const [ch, pairs] of Object.entries(chans)) {
@@ -496,7 +527,7 @@ function decodeOpen(slice) {  // the open slice, dense, by state and channel, fo
   return row;
 }
 
-function decodeRow(r) {  // a time-plot row from the server: {t, counts: {state: {"0": pairs}}}, summed over channels
+function decodeRow(r) {  // a time-plot row from the server: {t, counts: {state: {"0": histogram}}}, summed over channels
   const row = { t: r.t, stateSum: {}, live: false };
   for (const [st, chans] of Object.entries(r.counts)) for (const pairs of Object.values(chans)) decodeInto((row.stateSum[st] ??= new Float32Array(S.meta.nbins)), pairs);
   return row;

@@ -1,8 +1,10 @@
 """Serve a live web view of the histograms written by `mass2-live-apply`.
 
 GET  /                     the viewer page
-GET  /api/state?since=K&row_s=L   JSON: meta, status, channels, states, finalized slices with index >= K (or, for a
-                           page starting or far behind, a `base` of totals and time-plot rows L s long), open slice(s), fits
+GET  /api/state?since=K&row_s=L   an Arrow IPC stream: the histograms (finalized slices with index >= K or, for a
+                           page starting or far behind, a base of totals and time-plot rows L s long, and the open
+                           slice), with meta, status, channels, states and fits as JSON in its schema metadata
+GET  /arrow.js             Apache Arrow's JavaScript library, which the page reads the stream with
 GET  /fits/latest.png      the latest line fit drawn by mass2-live-fit
 POST /api/dataset          {"key": NAME} switch dataset   } only when run by mass2-live-demo,
 POST /api/speed            {"speed": X} playback speed  } which owns the simulator
@@ -21,6 +23,7 @@ import json
 import socket
 import threading
 from collections.abc import Sequence
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
@@ -30,12 +33,14 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
 from numpy.typing import NDArray
 
 from ..arrow_stream import ArrowStreamTailer
-from ..histogram import HistogramSlice, HistogramSpec, df_to_slices, sparse_counts
+from ..histogram import HistogramSlice, HistogramSpec, df_to_slices
 
 
+ARROW_JS = "apache-arrow-21.2.0.es2015.min.js"  # Apache Arrow's JavaScript build, from npm, served at /arrow.js
 ROWS = 120  # time-plot rows a page is sent at the start: more than its canvas shows (at most ~105)
 CATCH_UP_SLICES = 60  # a page further behind than this is sent a fresh `base` instead of the slices it missed
 
@@ -93,51 +98,43 @@ class HistogramStore:
         assert self.meta is not None
         return HistogramSpec(self.meta["e_lo"], self.meta["e_hi"], self.meta["bin_width"], self.meta["slice_s"])
 
-    def state(self, since: int = 0, row_s: float | None = None) -> dict:
-        """Everything the page needs, with finalized slices from index `since` onward.
+    def state(self, since: int = 0, row_s: float | None = None) -> tuple[dict, list["CountRow"]]:
+        """Everything the page needs: a small dict (run, meta, status, states, fits, ...) and the counts.
 
-        A page that is starting, or far behind, gets a `base` instead of every slice so far: the totals of
-        all finished slices, and the newest `ROWS` complete rows of the time plot (rows `row_s` long, summed
-        over channels), followed by only the finished slices of the row still filling. What it is sent then
-        stays the same size however long the run has gone; the slices themselves stay on this machine.
+        The counts are finished slices from index `since` onward, by channel, and the open slice(s). A page
+        that is starting, or far behind, gets a base instead of every slice so far: the totals of all
+        finished slices, and the newest `ROWS` complete rows of the time plot (rows `row_s` long, summed over
+        channels), followed by the finished slices of the row still filling, summed over channels (their
+        counts are already in the totals). What it is sent then stays the same size however long the run
+        has gone; the slices themselves stay on this machine.
         """
         with self._lock:
             self._update()
-            empty: dict[str, Any] = {
-                "run": self.run,
-                "meta": None,
-                "status": None,
-                "channels": [],
-                "states": [],
-                "slices": [],
-                "current": [],
-                "n_slices": 0,
-            }
+            info: dict[str, Any] = {"run": self.run, "meta": self.meta, "status": None, "channels": [], "states": [], "n_slices": 0}
             if self.meta is None:
-                return empty
+                return info, []
             current: list[HistogramSlice] = _read_if_exists(
                 self.hist_dir / "histograms_current.arrows", lambda p: df_to_slices(pl.read_ipc_stream(p), self.spec), []
             )
-            channels = self.channels | {ch for s in current for ch, _ in s.counts}
-            n = len(self.slices)
-            base = None
-            if since <= 0 or since > n or n - since > CATCH_UP_SLICES:
-                base, since = self._base(row_s)
-            return empty | {
+            n, rows = len(self.slices), []
+            base = since <= 0 or since > n or n - since > CATCH_UP_SLICES
+            if base:
+                since, row_us, rows = self._base(row_s)
+                info["row_s"] = row_us / 1e6
+            rows += [CountRow("slice", s.start_us / 1e6, st, ch, c) for s in self.slices[since:] for (ch, st), c in _by_channel(s, summed=base)]
+            rows += [CountRow("open", s.start_us / 1e6, st, ch, c) for s in current for (ch, st), c in s.counts.items()]
+            return info | {
                 "base": base,
-                "meta": self.meta,
                 "status": _read_if_exists(self.hist_dir / "status.json", lambda p: json.loads(p.read_text()), None),
                 "states": _read_if_exists(self.hist_dir / "states.json", lambda p: json.loads(p.read_text()), []),
-                "channels": [str(ch) for ch in sorted(channels)],
-                "n_slices": len(self.slices),
-                # after a base, the slices of the row still filling are in its totals: the time plot needs only their sum over channels
-                "slices": [_slice_json(s, summed=base is not None) for s in self.slices[since:]],
-                "current": [_slice_json(s) for s in current],
+                "channels": [str(ch) for ch in sorted(self.channels | {ch for s in current for ch, _ in s.counts})],
+                "n_slices": n,
                 "fits": _read_if_exists(self.hist_dir / "fits" / "fits.json", lambda p: json.loads(p.read_text()), None),
-            }
+            }, rows
 
-    def _base(self, row_s: float | None) -> tuple[dict, int]:
-        """The `base` of `state`, and the index of the first finished slice the page still needs."""
+    def _base(self, row_s: float | None) -> tuple[int, int, list["CountRow"]]:
+        """For `state`: the index of the first finished slice the page still needs, the row length in µs, and
+        the totals and time-plot rows."""
         slice_us = round(self.spec.slice_s * 1e6)
         row_us = max(1, round((row_s or self.spec.slice_s) * 1e6 / slice_us)) * slice_us
         row_of = [s.start_us // row_us for s in self.slices]  # rows on a fixed grid, as the page lays them out
@@ -147,10 +144,72 @@ class HistogramStore:
         for s, r in zip(self.slices[:first_open], row_of[:first_open]):
             if r >= open_row - ROWS:
                 row = sums.setdefault(r, {})
-                for (_, state), c in s.counts.items():
-                    row[state] = row[state] + c if state in row else c.copy()
-        rows = [{"t": r * row_us / 1e6, "counts": sparse_counts({(0, st): c for st, c in sums[r].items()})} for r in sorted(sums)]
-        return {"totals": sparse_counts(self.totals), "row_s": row_us / 1e6, "rows": rows}, first_open
+                for (_, st), c in s.counts.items():
+                    row[st] = row[st] + c if st in row else c.copy()
+        rows = [CountRow("total", None, st, ch, c) for (ch, st), c in self.totals.items()]
+        rows += [CountRow("row", r * row_us / 1e6, st, 0, c) for r in sorted(sums) for st, c in sums[r].items()]
+        return first_open, row_us, rows
+
+
+@dataclass(frozen=True)
+class CountRow:
+    """One histogram on the wire: `kind` is "total" (all finished slices), "row" (a time-plot row, summed over
+    channels, ch_num 0), "slice" (a finished slice) or "open" (the slice still filling); `t` its start, seconds."""
+
+    kind: str
+    t: float | None
+    state: str
+    ch_num: int
+    counts: NDArray[np.int64]
+
+
+def _by_channel(s: HistogramSlice, summed: bool) -> list[tuple[tuple[int, str], NDArray[np.int64]]]:
+    """A slice's histograms by (channel, state), or with `summed`, by (0, state) summed over channels."""
+    if not summed:
+        return list(s.counts.items())
+    out: dict[tuple[int, str], NDArray[np.int64]] = {}
+    for (_, st), c in s.counts.items():
+        out[(0, st)] = out[(0, st)] + c if (0, st) in out else c.copy()
+    return list(out.items())
+
+
+WIRE_SCHEMA = pa.schema([
+    ("kind", pa.dictionary(pa.int8(), pa.utf8())),
+    ("t", pa.float64()),
+    ("state", pa.dictionary(pa.int16(), pa.utf8())),
+    ("ch_num", pa.int32()),
+    ("bins", pa.list_(pa.uint16())),  # the nonempty bins only
+    ("counts", pa.list_(pa.int32())),
+])  # fmt: skip
+
+
+def to_arrow_ipc(info: dict, rows: list[CountRow]) -> bytes:
+    """An Arrow IPC stream of `rows` (see WIRE_SCHEMA), with `info` as JSON in the schema metadata."""
+    nz = [np.flatnonzero(r.counts) for r in rows]
+    offsets = pa.array(np.concatenate([[0], np.cumsum([len(b) for b in nz])]).astype(np.int32))
+    bins = np.concatenate(nz).astype(np.uint16) if nz else np.zeros(0, np.uint16)
+    counts = np.concatenate([r.counts[b] for r, b in zip(rows, nz)]).astype(np.int32) if nz else np.zeros(0, np.int32)
+    table = pa.table(
+        [
+            pa.array([r.kind for r in rows], pa.utf8()).dictionary_encode().cast(WIRE_SCHEMA.field("kind").type),
+            pa.array([r.t for r in rows], pa.float64()),
+            pa.array([r.state for r in rows], pa.utf8()).dictionary_encode().cast(WIRE_SCHEMA.field("state").type),
+            pa.array([r.ch_num for r in rows], pa.int32()),
+            pa.ListArray.from_arrays(offsets, pa.array(bins)),
+            pa.ListArray.from_arrays(offsets, pa.array(counts)),
+        ],
+        schema=WIRE_SCHEMA.with_metadata({"mass2.live": json.dumps(info)}),
+    )
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
+
+def from_arrow_ipc(data: bytes) -> tuple[dict, pa.Table]:
+    """The reverse of `to_arrow_ipc`: the info dict and the table."""
+    table = pa.ipc.open_stream(data).read_all()
+    return json.loads(table.schema.metadata[b"mass2.live"]), table
 
 
 T = TypeVar("T")
@@ -164,19 +223,9 @@ def _read_if_exists(path: Path, read: Callable[[Path], T], default: T) -> T:
         return default
 
 
-def _slice_json(s: HistogramSlice, summed: bool = False) -> dict:
-    """{"t": start seconds, "counts": {state: {channel: [bin gap, count, ...]}}} (see `sparse_counts`).
-    `summed`: one entry per state, channel "0", holding the sum over channels."""
-    counts = s.counts
-    if summed:
-        counts = {}
-        for (_, state), c in s.counts.items():
-            counts[(0, state)] = counts[(0, state)] + c if (0, state) in counts else c.copy()
-    return {"t": s.start_us / 1e6, "counts": sparse_counts(counts)}
-
-
 def _handler_for(store: HistogramStore, controller: Controller | None) -> type[BaseHTTPRequestHandler]:
     page = resources.files("mass2.live.viewer").joinpath("viewer.html").read_bytes()
+    arrow_js = resources.files("mass2.live.viewer").joinpath(ARROW_JS).read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -192,8 +241,11 @@ def _handler_for(store: HistogramStore, controller: Controller | None) -> type[B
             elif url.path == "/api/state":
                 query = parse_qs(url.query)
                 since, row_s = int(query.get("since", ["0"])[0]), float(query.get("row_s", ["0"])[0])
-                body = store.state(since, row_s if row_s > 0 else None) | {"controller": controller.describe() if controller else None}
-                self._send(json.dumps(body).encode(), "application/json")
+                info, rows = store.state(since, row_s if row_s > 0 else None)
+                info["controller"] = controller.describe() if controller else None
+                self._send(to_arrow_ipc(info, rows), "application/vnd.apache.arrow.stream")
+            elif url.path == "/arrow.js":
+                self._send(arrow_js, "text/javascript; charset=utf-8")
             else:
                 self.send_error(404)
 

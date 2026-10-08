@@ -62,7 +62,7 @@ def test_6_viewer_and_demo_switch_dataset_and_speed(tmp_path):
     def state_when(ok, timeout=120):
         t0 = time.time()
         while time.time() - t0 < timeout:
-            s = json.load(urllib.request.urlopen(f"{url}/api/state?since=0"))
+            s, _ = server.from_arrow_ipc(urllib.request.urlopen(f"{url}/api/state?since=0").read())
             if ok(s):
                 return s
             assert not controller.failed()
