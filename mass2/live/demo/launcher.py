@@ -28,6 +28,8 @@ from .datasets import DATASETS, DemoDataset
 from .simulate import state_file_path
 from ..viewer.server import HistogramStore, start_server, viewer_urls
 
+MIN_SPEED, MAX_SPEED = 1.0, 600.0  # the viewer's playback-speed slider runs 1x to 600x real time
+
 
 class DemoController:
     """Owns the simulator and applier processes for one dataset at a time."""
@@ -52,7 +54,10 @@ class DemoController:
         }
 
     def set_speed(self, speed: float) -> None:
-        """Change the playback speed of the running simulator (it picks this up before its next chunk)."""
+        """Change the playback speed of the running simulator (it picks this up before its next chunk).
+        Raises ValueError outside the viewer's own range, so no request can make the simulator write without pause."""
+        if not MIN_SPEED <= float(speed) <= MAX_SPEED:
+            raise ValueError(f"speed must be between {MIN_SPEED} and {MAX_SPEED}")
         self.speed = float(speed)
         if self.active is not None:
             self._write_speed(self.workdir / self.active)
