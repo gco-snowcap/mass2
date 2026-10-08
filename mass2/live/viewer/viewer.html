@@ -223,6 +223,8 @@
           <p class="desc" id="specDesc">Good pulses from all channels, summed.</p>
         </div>
         <div class="tools">
+          <span class="label">Selected states</span>
+          <span class="seg"><button id="sumBtn" aria-pressed="true">Summed</button><button id="eachBtn" aria-pressed="false">Each in its colour</button></span>
           <span class="label">Counts axis</span>
           <span class="seg"><button id="logBtn" aria-pressed="true">Log</button><button id="linBtn" aria-pressed="false">Linear</button></span>
         </div>
@@ -270,6 +272,7 @@
         </div>
         <span class="heat-key">fewer <i></i> more counts</span>
       </div>
+      <div class="tools" style="margin-bottom:8px"><span class="label">Row length</span><span class="seg" id="rowSeg"></span></div>
       <canvas id="waterfall" aria-label="Energy versus time plot"></canvas>
       <div class="readout" id="fallReadout"></div>
     </section>
@@ -383,6 +386,8 @@ const S = {
   baseRows: [], baseRowS: null,  // time-plot rows the server built for this page's row length
   timeline: [], stateNames: [], hiddenStates: new Set(), overlay: [], metric: "counts", log: true, view: null,
   tab: "spectra", detail: null, fits: null,
+  eachState: false,    // spectrum: one curve per selected state, in its colour, instead of their sum
+  rowChoice: null,     // time plot: row length chosen in the page, seconds of data; null = follow the playback speed
   prev: null,          // previous status, for "+N since last update" and the rate
   rate: null,
   gain: {},            // channel -> apparent gain (fraction) or null
@@ -608,7 +613,7 @@ function ingest(s) {
 const MAX_ROWS = 120;  // more than the canvas shows (one row needs at least 4 px)
 const ROW_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 21600, 43200];
 function rowLength() {
-  const base = S.meta.slice_s, want = currentSpeed() * 12;
+  const base = S.meta.slice_s, want = S.rowChoice ?? currentSpeed() * 12;  // chosen, or ~12 s of wall time at this speed
   const nice = ROW_STEPS.find(x => x >= want) ?? want;
   return Math.max(1, Math.round(nice / base)) * base;
 }
@@ -936,9 +941,17 @@ function drawSpectrum() {
     const base = sumAll([ch], states), t = total(base), scale = t ? sumTotal / t : 0;
     return { ch, data: rebin(base, f, j0, j1).map(v => v * scale * perS), factor: scale, n: t };
   });
+  // each state on its own, per second spent in that state, so states of different lengths compare directly
+  // each state on its own: its counts over the seconds spent in it, with the Poisson ±1σ band (√n over the same seconds)
+  const perState = !S.eachState ? [] : states.map(st => {
+    const base = sumAll(null, [st]), secs = exposureS([st]), counts = rebin(base, f, j0, j1);
+    return { st, n: total(base), secs, data: counts.map(v => v / secs), sigma: counts.map(v => Math.sqrt(v) / secs) };
+  }).filter(c => c.secs > 0);
   const yfloor = 0.5 * perS;  // half a count, as a rate: the bottom of the log axis
   let ymax = 2 * yfloor;
   for (const arr of [sum, ...overlays.map(o => o.data)]) for (const v of arr) ymax = Math.max(ymax, v);
+  // a state's rates set the axis only where they are measured to better than 1σ, so a lone count in a short state cannot stretch it
+  for (const c of perState) for (let k = 0; k < c.data.length; k++) ymax = Math.max(ymax, c.data[k] - c.sigma[k]);
   ymax *= 1.15;
   const yOf = v => m.top + ph * (1 - (S.log ? Math.log10(Math.max(v, yfloor) / yfloor) / Math.log10(ymax / yfloor) : v / ymax));
   const eOf = j => meta.e_lo + j * dw;
@@ -974,22 +987,34 @@ function drawSpectrum() {
     ctx.fillText("fit region", Math.max(xa + 3, m.left + 3), m.top + 3);
   }
   stepPath(sum); ctx.fillStyle = css("--sum-fill"); ctx.fill();
-  ctx.strokeStyle = INK; ctx.lineWidth = 1.25; ctx.stroke();
+  if (!S.eachState) { ctx.strokeStyle = INK; ctx.lineWidth = 1.25; ctx.stroke(); }
+  for (const c of perState) {  // the ±1σ band, then the rate
+    const lo = c.data.map((v, k) => v - c.sigma[k]), hi = c.data.map((v, k) => v + c.sigma[k]);
+    ctx.beginPath();
+    for (let k = 0; k < hi.length; k++) { const y = yOf(hi[k]); ctx[k ? "lineTo" : "moveTo"](xOf(eOf(j0 + k)), y); ctx.lineTo(xOf(eOf(j0 + k + 1)), y); }
+    for (let k = lo.length - 1; k >= 0; k--) { const y = yOf(lo[k]); ctx.lineTo(xOf(eOf(j0 + k + 1)), y); ctx.lineTo(xOf(eOf(j0 + k)), y); }
+    ctx.closePath(); ctx.globalAlpha = 0.18; ctx.fillStyle = stateColour(c.st); ctx.fill(); ctx.globalAlpha = 1;
+    stepPath(c.data); ctx.strokeStyle = stateColour(c.st); ctx.lineWidth = 1.5; ctx.stroke();
+  }
   for (const o of overlays) { stepPath(o.data); ctx.strokeStyle = overlayColour(o.ch); ctx.lineWidth = 1.5; ctx.stroke(); }
   ctx.restore();
   energyAxis(g);
 
   const which = states.length === S.stateNames.length ? "all experiment states" : `states ${states.join(", ") || "none"}`;
-  document.getElementById("specDesc").textContent =
-    `Good pulses from all ${S.channels.length} channels, summed, ${which}: ${fmt.int(sumTotal)} pulses in ${fmtDuration(expo)} of measurement `
-    + `(${fmtRate(sumTotal / expo)} per second). Rates are per second of the original measurement, so playback speed does not change them.`;
+  document.getElementById("specDesc").textContent = S.eachState
+    ? `Good pulses from all ${S.channels.length} channels, each selected state in the colour of its button below, as pulses per second spent in that state `
+      + `(${perState.map(c => `${c.st === NO_STATE ? "before start" : c.st} ${fmtDuration(c.secs)}, ${fmt.int(c.n)} pulses`).join("; ") || "none selected"}), so states of different lengths compare directly. `
+      + `Each shaded band is ±1σ from counting statistics (√counts over the same seconds): wide for a short state. The counts axis covers what is measured to better than 1σ. `
+      + `The grey fill is the sum of the selected states, per second of all of them.`
+    : `Good pulses from all ${S.channels.length} channels, summed, ${which}: ${fmt.int(sumTotal)} pulses in ${fmtDuration(expo)} of measurement `
+      + `(${fmtRate(sumTotal / expo)} per second). Rates are per second of the original measurement, so playback speed does not change them.`;
   const finest = f === 1;
   document.getElementById("zoomInfo").innerHTML =
     `Showing <b>${fmt.energy(S.view[0], bigEnergy())} to ${fmt.energy(S.view[1], bigEnergy())}</b> in <b>${fmtWidth(dw)}</b> bins`
     + (finest ? ` — the finest available: the bin size used for resolution fits in the original analysis${meta.bin_source ? ` (${escapeHtml(meta.bin_source)})` : ""}.`
               : `. Zoom in for finer bins, down to ${fmtWidth(meta.bin_width)}.`);
   renderOverlayChips(overlays);
-  return { sum, overlays, bins };
+  return { sum, overlays, perState, bins };
 }
 
 function renderOverlayChips(overlays) {
@@ -1469,6 +1494,32 @@ const setLog = log => {
   document.getElementById("linBtn").setAttribute("aria-pressed", !log);
   render();
 };
+// ---- time-plot row length: Auto follows the playback speed; or a fixed length of data time
+const ROW_CHOICES = [[null, "Auto"], [60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [900, "15 min"]];
+function setupRowChoice() {
+  const seg = document.getElementById("rowSeg");
+  for (const [secs, label] of ROW_CHOICES) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.title = secs == null ? "Rows fill in about 12 s of wall time at the current playback speed" : `Each row holds ${label} of data`;
+    b.onclick = () => { S.rowChoice = secs; showRowChoice(); render(); };
+    seg.append(b);
+  }
+  showRowChoice();
+}
+function showRowChoice() {
+  document.querySelectorAll("#rowSeg button").forEach((b, k) => b.setAttribute("aria-pressed", ROW_CHOICES[k][0] === S.rowChoice));
+}
+setupRowChoice();
+
+const setEachState = each => {
+  S.eachState = each;
+  document.getElementById("sumBtn").setAttribute("aria-pressed", !each);
+  document.getElementById("eachBtn").setAttribute("aria-pressed", each);
+  render();
+};
+document.getElementById("sumBtn").onclick = () => setEachState(false);
+document.getElementById("eachBtn").onclick = () => setEachState(true);
 document.getElementById("logBtn").onclick = () => setLog(true);
 document.getElementById("linBtn").onclick = () => setLog(false);
 for (const [id, metric] of [["mCounts", "counts"], ["mGain", "gain"]]) {
@@ -1494,6 +1545,7 @@ function readout(canvas, e) {
   const big = bigEnergy(), binTxt = `${fmt.energy(meta.e_lo + j * dw, big)} to ${fmt.energy(meta.e_lo + (j + 1) * dw, big)}`;
   if (canvas.id === "spectrum") {
     let text = `Bin ${binTxt}: ${fmtRate(geo.sum[k])} good pulses per second (all channels)`;
+    for (const c of geo.perState) text += `; ${c.st === NO_STATE ? "before start" : c.st}: ${fmtRate(c.data[k])} ± ${fmtRate(c.sigma[k])}/s`;
     for (const o of geo.overlays) text += `; ch ${o.ch} scaled: ${fmtRate(o.data[k])}/s`;
     document.getElementById("specReadout").textContent = text;
   } else {
