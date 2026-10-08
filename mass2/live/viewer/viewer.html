@@ -270,7 +270,7 @@
           <h2 id="fallTitle">Energy vs time, with the experiment state</h2>
           <p class="desc" id="fallDesc">Each row is one time slice, newest at the top. The column on the left shows which experiment state the instrument was in.</p>
         </div>
-        <span class="heat-key">fewer <i></i> more counts</span>
+        <span class="heat-key" id="heatKey">fewer <i></i> more counts</span>
       </div>
       <div class="tools" style="margin-bottom:8px"><span class="label">Row length</span><span class="seg" id="rowSeg"></span></div>
       <canvas id="waterfall" aria-label="Energy versus time plot"></canvas>
@@ -1047,56 +1047,83 @@ function toggleOverlay(ch) {
 function drawWaterfall() {
   const g = setup(document.getElementById("waterfall"));
   const { ctx, pw, ph, m } = g, meta = S.meta, states = visibleStates();
-  const { len: slice, rows: rowsAll } = timeRows();
+  const { len, rows: rowsAll } = timeRows();
   const nShow = Math.max(1, Math.min(rowsAll.length, Math.floor(ph / 4)));
   const rows = rowsAll.slice(-nShow).reverse();  // newest at the top
   const bins = displayBinning(pw), { f, j0, j1 } = bins, nb = Math.max(1, j1 - j0), rowH = ph / nShow;
-  const lines = rows.map(r => rebin(rowSum(r, states), f, j0, j1));
-  let vmax = 1;
-  for (const l of lines) for (const v of l) vmax = Math.max(vmax, v);
-  const floor = Number(css("--ramp-floor")) || 0;
-  if (rows.length) {
-    const img = new ImageData(nb, rows.length);
-    lines.forEach((l, r) => {
-      for (let k = 0; k < l.length; k++) {
-        if (!(l[k] > 0)) continue;
-        const [R, G, B] = rampAt(RAMP, floor + (1 - floor) * Math.log1p(l[k]) / Math.log1p(vmax));
-        const p = 4 * (r * nb + k);
+  const first = S.status?.first_data_us ? S.status.first_data_us / 1e6 : -Infinity;
+  const latest = S.status?.latest_data_us ? S.status.latest_data_us / 1e6 : Infinity;
+
+  // ---- pieces: each row split where the experiment state changes, so no piece mixes states. A piece holds only
+  // its own state's counts, over the seconds of data in it: the row's span, from the first pulse to the newest.
+  const pieces = [];
+  rows.forEach((r, k) => {
+    const a0 = Math.max(r.t, first), b0 = Math.min(r.t + len, latest);
+    const edges = [a0, ...S.timeline.map(([t]) => t).filter(t => t > a0 && t < b0), b0];
+    const spans = [];
+    for (let j = 0; j + 1 < edges.length; j++) if (edges[j + 1] > edges[j]) spans.push({ a: edges[j], b: edges[j + 1], st: stateAt(edges[j]) });
+    const secsOf = {};  // a state back again within one row shares its counts between its pieces by duration
+    for (const sp of spans) secsOf[sp.st] = (secsOf[sp.st] ?? 0) + (sp.b - sp.a);
+    for (const sp of spans.reverse()) {  // newest first, as the rows are
+      const counts = r.stateSum[sp.st], secs = sp.b - sp.a;
+      const shown = states.includes(sp.st) && counts;
+      pieces.push({
+        ...sp, row: k, secs, live: r.live,
+        y0: m.top + rowH * (k + 1 - (sp.b - r.t) / len), y1: m.top + rowH * (k + 1 - (sp.a - r.t) / len),
+        counts: shown ? rebin(counts, f, j0, j1).map(v => v * secs / secsOf[sp.st]) : null,  // counts in this piece
+      });
+    }
+  });
+
+  // ---- colour: good pulses per second in each bin, on a log scale spanning three decades below the highest
+  // average rate of any selected state. It depends on the states and the energy bins, never on the row length.
+  let top = 0;
+  for (const st of states) {
+    const secs = exposureS([st]);
+    if (secs) for (const v of rebin(sumAll(null, [st]), f, j0, j1)) top = Math.max(top, v / secs);
+  }
+  top = top || 1;
+  const lo = top / 1000, floor = Number(css("--ramp-floor")) || 0;
+  const colourOf = rate => rampAt(RAMP, floor + (1 - floor) * Math.min(1, Math.max(0, Math.log10(rate / lo) / 3)));
+  const drawn = pieces.filter(pc => pc.counts && pc.secs > 0);
+  if (drawn.length) {
+    const img = new ImageData(nb, drawn.length);
+    drawn.forEach((pc, i) => {
+      for (let k = 0; k < pc.counts.length; k++) {
+        if (!(pc.counts[k] > 0)) continue;
+        const [R, G, B] = colourOf(pc.counts[k] / pc.secs), p = 4 * (i * nb + k);
         img.data[p] = R; img.data[p + 1] = G; img.data[p + 2] = B; img.data[p + 3] = 255;
       }
     });
     const off = document.createElement("canvas");
-    off.width = nb; off.height = rows.length;
+    off.width = nb; off.height = drawn.length;
     off.getContext("2d").putImageData(img, 0, 0);
     ctx.imageSmoothingEnabled = false;
-    // the first and last display bins may extend past the view; place the image by bin edges
+    // the first and last display bins may extend past the view; place each piece by bin edges
     const x0 = g.xOf(meta.e_lo + j0 * bins.dw), x1 = g.xOf(meta.e_lo + j1 * bins.dw);
     ctx.save(); ctx.beginPath(); ctx.rect(m.left, m.top, pw, ph); ctx.clip();
-    ctx.drawImage(off, x0, m.top, x1 - x0, rowH * rows.length);
+    drawn.forEach((pc, i) => ctx.drawImage(off, 0, i, nb, 1, x0, pc.y0, x1 - x0, pc.y1 - pc.y0));
     ctx.restore();
   }
   ctx.strokeStyle = RULE; ctx.strokeRect(m.left + 0.5, m.top + 0.5, pw - 1, ph - 1);
+  document.getElementById("heatKey").innerHTML =
+    `${fmtRate(lo)} <i></i> ${fmtRate(top)} good pulses/s per ${fmtWidth(bins.dw)} bin`;
 
-  // ---- experiment-state column, with names written in, and state changes marked across the plot
+  // ---- experiment-state column, one block per piece, with names written in, and state changes marked across the plot
   const sx = m.left - m.state - 6;
   const yOfTime = t => {  // continuous time -> y, using the row that holds t
     for (let k = 0; k < rows.length; k++) {
       const r = rows[k];
-      if (t >= r.t && t <= r.t + slice) return m.top + rowH * (k + 1 - (t - r.t) / slice);
+      if (t >= r.t && t <= r.t + len) return m.top + rowH * (k + 1 - (t - r.t) / len);
     }
     return null;
   };
   const segs = [];
-  rows.forEach((r, k) => {
-    const top = m.top + rowH * k, edges = [r.t, ...S.timeline.map(([t]) => t).filter(t => t > r.t && t < r.t + slice), r.t + slice];
-    for (let j = edges.length - 2; j >= 0; j--) {  // newest part of the row is at the top
-      const st = stateAt(edges[j]);
-      const yTop = top + rowH * (1 - (edges[j + 1] - r.t) / slice), yBot = top + rowH * (1 - (edges[j] - r.t) / slice);
-      const lastSeg = segs[segs.length - 1];
-      if (lastSeg && lastSeg.st === st && Math.abs(lastSeg.y1 - yTop) < 0.5) lastSeg.y1 = yBot;
-      else segs.push({ st, y0: yTop, y1: yBot });
-    }
-  });
+  for (const pc of pieces) {
+    const lastSeg = segs[segs.length - 1];
+    if (lastSeg && lastSeg.st === pc.st && Math.abs(lastSeg.y1 - pc.y0) < 0.5) lastSeg.y1 = pc.y1;
+    else segs.push({ st: pc.st, y0: pc.y0, y1: pc.y1 });
+  }
   for (const sg of segs) {
     const hidden = S.hiddenStates.has(sg.st), col = stateColour(sg.st);
     ctx.globalAlpha = hidden ? 0.3 : 1;
@@ -1137,9 +1164,9 @@ function drawWaterfall() {
   ctx.font = `600 ${m.font}px system-ui, sans-serif`;
   ctx.fillText("State", sx + m.state / 2, m.top - 6);
   ctx.textAlign = "right";
-  ctx.fillText(m.narrow ? "Start" : "Slice start", sx - 6, m.top - 6);
+  ctx.fillText(m.narrow ? "Start" : "Row start", sx - 6, m.top - 6);
   ctx.textAlign = "left";
-  ctx.fillText(`Counts in each ${fmtDuration(slice)} slice →`, m.left, m.top - 6);
+  ctx.fillText(`Good pulses per second in each ${fmtDuration(len)} row →`, m.left, m.top - 6);
   ctx.font = `${m.font}px system-ui, sans-serif`;
   ctx.fillStyle = MUTED; ctx.textAlign = "right"; ctx.textBaseline = "middle";
   const every = Math.max(1, Math.ceil((m.font + 8) / rowH));
@@ -1151,9 +1178,11 @@ function drawWaterfall() {
 
   const which = states.length === S.stateNames.length ? "all states" : `only ${states.join(", ") || "no states"}`;
   document.getElementById("fallDesc").textContent =
-    `Each row is one ${fmtDuration(slice)} slice of good pulses from all channels (${which}) in ${fmtWidth(bins.dw)} bins, newest at the top; the outlined top row is still filling. `
-    + `The State column shows which experiment state the instrument was in; dashed lines mark each change.`;
-  return { rows, rowH, lines, bins, len: slice };
+    `Each row is ${fmtDuration(len)} of data, newest at the top, split wherever the experiment state changes so that no part of a row mixes states. `
+    + `Colour is good pulses per second in each ${fmtWidth(bins.dw)} bin, all channels (${which}): the counts of that part of the row over its own seconds, `
+    + `on a log scale set by the selected states' average spectra, so a colour means the same rate at every row length. `
+    + `The outlined top row is still filling; the State column shows the state of each part, and dashed lines mark each change.`;
+  return { rows, pieces, rowH, bins, len };
 }
 
 // ---- which states the spectrum, the map, the time plot and the line fit include. On the live server this is
@@ -1542,7 +1571,7 @@ function readout(canvas, e) {
   const E = eAt(canvas, e.clientX), meta = S.meta, m = margins(canvas.id);
   const geo = canvas.id === "spectrum" ? geometry.spec : geometry.fall, { dw, j0 } = geo.bins;
   const j = Math.floor((E - meta.e_lo) / dw), k = j - j0;
-  if (k < 0 || k >= (canvas.id === "spectrum" ? geo.sum.length : geo.lines[0]?.length ?? 0)) return;
+  if (k < 0 || k >= (canvas.id === "spectrum" ? geo.sum.length : geo.bins.j1 - geo.bins.j0)) return;
   const big = bigEnergy(), binTxt = `${fmt.energy(meta.e_lo + j * dw, big)} to ${fmt.energy(meta.e_lo + (j + 1) * dw, big)}`;
   if (canvas.id === "spectrum") {
     let text = geo.perState.length ? `Bin ${binTxt}, good pulses per second in each state (all channels)` : `Bin ${binTxt}: ${fmtRate(geo.sum[k])} good pulses per second (all channels)`;
@@ -1550,12 +1579,14 @@ function readout(canvas, e) {
     for (const o of geo.overlays) text += `; ch ${o.ch} scaled: ${fmtRate(o.data[k])}/s`;
     document.getElementById("specReadout").textContent = text;
   } else {
-    const rect = canvas.getBoundingClientRect();
-    const r = Math.floor((e.clientY - rect.top - m.top) / geo.rowH), row = geo.rows[r];
-    if (!row) return;
-    const when = row.live ? "the slice still filling" : `the slice starting ${fmt.clock(row.t)}`;
-    document.getElementById("fallReadout").textContent =
-      `Bin ${binTxt}, ${when} (state ${stateAt(row.t + geo.len / 2)}): ${fmt.int(geo.lines[r][k])} good pulses`;
+    const y = e.clientY - canvas.getBoundingClientRect().top;
+    const pc = geo.pieces.find(p => y >= p.y0 && y < p.y1);
+    if (!pc) return;
+    const name = pc.st === NO_STATE ? "before start" : pc.st;
+    document.getElementById("fallReadout").textContent = !pc.counts
+      ? `${name}, ${fmt.clock(pc.a)} to ${fmt.clock(pc.b)}: not among the selected states`
+      : `Bin ${binTxt}, ${name} from ${fmt.clock(pc.a)} to ${fmt.clock(pc.b)} (${fmtDuration(pc.secs)}): `
+        + `${fmtRate(pc.counts[k] / pc.secs)} good pulses per second (${fmt.int(pc.counts[k])} pulses)`;
   }
 }
 
