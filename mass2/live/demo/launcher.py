@@ -7,12 +7,13 @@ For the chosen dataset (see `datasets.py`):
    Fake channels at a different gain have recipes of their own in it; exact copies borrow their source channel's.
 3. Start `mass2-live-fit`, refitting the line the original analysis fitted, on all channels summed.
 The viewer is served from this process. Picking another dataset in the page stops 1 and 2 and restarts them.
-When a run has replayed its data (`--repeats` passes, default 1) it starts over from empty files, so the files
-on disk never hold more than one run.
+The data are replayed again and again, continuing the timeline, so the run goes on across passes and a change
+of playback speed never interrupts it. Only when the run's files reach `--max-gb` does it start over from
+empty files, so the disk never holds more than that.
 
 Each pipeline tool runs as its own process, exactly as it would from the command line. Ctrl-C stops them all.
 
-Command line:  mass2-live-demo [WORKDIR] [--dataset bessy_20240727] [--lan] [--port 8765]
+Command line:  mass2-live-demo [WORKDIR] [--dataset bessy_20240727] [--speed 5] [--max-gb 20] [--lan] [--port 8765]
 """
 
 import argparse
@@ -28,6 +29,7 @@ from pathlib import Path
 
 from .datasets import DATASETS, DemoDataset
 from .simulate import state_file_path
+from ..fit import read_selected_states, write_selected_states
 from ..viewer.server import HistogramStore, start_server, viewer_urls
 
 MIN_SPEED, MAX_SPEED = 1.0, 600.0  # the viewer's playback-speed slider runs 1x to 600x real time
@@ -70,16 +72,20 @@ class DemoController:
         tmp.replace(run_dir / "speed.json")
 
     def switch(self, key: str) -> None:
-        """Stop the current pipeline and start `key`'s. Raises KeyError if unknown."""
+        """Stop the current pipeline and start `key`'s. Raises KeyError if unknown. Starting the same dataset
+        over keeps the viewer's selection of states."""
         dataset = DATASETS[key]
         with self._lock:
             self._stop_procs()
-            self.active = key
             run_dir = self.workdir / key
+            keep = read_selected_states(run_dir / "hist") if key == self.active else None
+            self.active = key
             run_dir.mkdir(parents=True, exist_ok=True)
             for stale in [run_dir / "pulses.arrows", state_file_path(run_dir / "pulses.arrows"), *(run_dir / "hist").rglob("*.*")]:
                 stale.unlink(missing_ok=True)  # never let the applier or viewer pick up a previous run
             self.store.reset(run_dir / "hist")
+            if keep is not None:
+                write_selected_states(run_dir / "hist", keep)
             self._write_speed(run_dir)
             self._procs = pipeline_processes(dataset, run_dir, self.repeats, self.sim_extra)
             self.phase = "running"
@@ -89,6 +95,17 @@ class DemoController:
         with self._lock:
             proc = self._procs.get("mass2-live-apply")
             return proc is not None and proc.poll() == 0
+
+    def pids(self) -> dict[str, int]:
+        """The running pipeline processes, by name."""
+        with self._lock:
+            return {name: proc.pid for name, proc in self._procs.items() if proc.poll() is None}
+
+    def run_bytes(self) -> int:
+        """Bytes in the running dataset's files."""
+        if self.active is None:
+            return 0
+        return sum(p.stat().st_size for p in (self.workdir / self.active).rglob("*") if p.is_file())
 
     def failed(self) -> list[str]:
         """Names of pipeline tools that exited with an error."""
@@ -149,9 +166,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     p.add_argument("--dataset", choices=sorted(DATASETS), default="bessy_20240727", help="dataset to start with")
     p.add_argument(
-        "--repeats", type=int, default=1,
-        help="passes over the data in one run, after which the run starts over from empty files (default 1); 0 = one endless run",
+        "--repeats", type=int, default=0,
+        help="passes over the data in one run, after which the run starts over (default 0: replay without end)",
     )
+    p.add_argument("--max-gb", type=float, default=20.0, help="start the run over when its files reach this size, GB (default 20)")
     p.add_argument(
         "--speed", type=float, default=5.0, help="starting playback speed, multiples of real time (default 5); change it in the page"
     )
@@ -178,9 +196,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     # SIGTERM (e.g. from `kill` or `timeout`) must clean up the children exactly as Ctrl-C does.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
+        checked = 0.0
         while not (failed := controller.failed()):
-            if controller.pass_done() and controller.active is not None:
-                controller.switch(controller.active)  # start over, so the run's files never outgrow one pass
+            if controller.active is not None and controller.pass_done():
+                controller.switch(controller.active)  # every pass asked for is done: start over
+            if time.time() - checked > 10:
+                checked = time.time()
+                if controller.active is not None and controller.run_bytes() > args.max_gb * 1e9:
+                    controller.switch(controller.active)  # start over, so the run's files never outgrow --max-gb
             time.sleep(0.5)
         print(f"mass2-live-demo: {', '.join(failed)} failed; stopping everything", flush=True)
     except KeyboardInterrupt:

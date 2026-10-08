@@ -43,6 +43,9 @@
   #speedLabel { display: flex; align-items: center; gap: 8px; font-size: 0.875rem; color: var(--muted); }
   #speedLabel input { width: 140px; accent-color: var(--ink); }
   #speedLabel output { min-width: 9ch; color: var(--ink); font-weight: 600; }
+  #memory { margin: 8px 0 0; }
+  #memory b { color: var(--ink); font-weight: 600; }
+  .proc .name .mem { font-weight: 400; color: var(--muted); font-size: 0.8125rem; }
   #explain { margin: 8px 0 14px; max-width: 80ch; font-size: 0.9375rem; color: var(--muted); }
   #explain strong { color: var(--ink); font-weight: 600; }
 
@@ -202,6 +205,7 @@
   <div class="counter" id="c-state"><div class="label">Experiment state now</div><div class="value">—</div><div class="delta"></div></div>
   <div class="counter" id="c-clock"><div class="label">Time of newest pulse</div><div class="value">—</div><div class="delta"></div></div>
 </section>
+<p class="small muted" id="memory" hidden></p>
 
 <nav class="views" role="tablist" aria-label="View">
   <button role="tab" id="tab-spectra" aria-selected="true" aria-controls="view-spectra">Spectra</button>
@@ -234,6 +238,7 @@
         <button id="resetBtn">Full range</button>
       </div>
       <p class="small muted" id="zoomInfo" style="margin:6px 0 2px"></p>
+      <div class="chips" id="stateChips"><span class="label">States in the spectrum and the line fit:</span></div>
       <div class="chips" id="overlayChips"></div>
       <canvas id="spectrum" aria-label="Energy spectrum plot"></canvas>
       <div class="readout" id="specReadout"><span class="hint">Zoom with the buttons, by dragging across an energy range, by pinching on a phone, or with a trackpad pinch (or Ctrl + scroll) on a computer.</span></div>
@@ -265,7 +270,6 @@
         </div>
         <span class="heat-key">fewer <i></i> more counts</span>
       </div>
-      <div class="chips" id="stateChips"><span class="label">States included in both plots:</span></div>
       <canvas id="waterfall" aria-label="Energy versus time plot"></canvas>
       <div class="readout" id="fallReadout"></div>
     </section>
@@ -555,8 +559,10 @@ function ingest(s) {
     S.current = s.current.map(decodeOpen);
     S.timeline = s.states;
     S.fits = s.fits || null;
+    S.processes = s.processes ?? null;
     S.channels = s.channels;
     noteStates(s);
+    if (!REPLAY) followSelection(s.selected_states);
     const st = s.status;
     if (st && S.status && st.updated_unix_s > S.status.updated_unix_s) {
       const r = (st.records - S.status.records) / (st.updated_unix_s - S.status.updated_unix_s);
@@ -1090,6 +1096,40 @@ function drawWaterfall() {
   return { rows, rowH, lines, bins, len: slice };
 }
 
+// ---- which states the spectrum, the map, the time plot and the line fit include. On the live server this is
+// one selection shared by every viewer (the fit is one process); a recording keeps it in the page.
+let pendingSelection;  // a selection sent to the server and not yet seen back from it
+const selectionKey = sel => JSON.stringify(sel == null ? null : [...sel].sort());
+function followSelection(sel) {
+  if (pendingSelection !== undefined) {
+    if (selectionKey(sel) !== pendingSelection) return;  // a poll that left before our change
+    pendingSelection = undefined;
+  }
+  const want = new Set(sel ?? S.stateNames);
+  const hidden = S.stateNames.filter(st => !want.has(st));
+  if (hidden.length !== S.hiddenStates.size || hidden.some(st => !S.hiddenStates.has(st))) { S.hiddenStates = new Set(hidden); S.gain = gainCheck(); }
+}
+function setHiddenStates(hidden) {
+  S.hiddenStates = new Set(hidden);
+  S.gain = gainCheck();
+  if (!REPLAY) sendSelection(S.hiddenStates.size ? visibleStates() : null);
+  render();
+}
+// One request at a time, newest selection last, so quick clicks can never reach the server out of order.
+let sending = false, toSend;
+async function sendSelection(sel) {
+  pendingSelection = selectionKey(sel);
+  toSend = { states: sel };
+  if (sending) return;
+  sending = true;
+  while (toSend) {
+    const body = JSON.stringify(toSend);
+    toSend = undefined;
+    try { await fetch("api/states", { method: "POST", headers: { "Content-Type": "application/json" }, body }); } catch (e) { /* the next poll shows what the server has */ }
+  }
+  sending = false;
+}
+
 function renderStateChips() {
   const box = document.getElementById("stateChips");
   box.querySelectorAll("button").forEach(b => b.remove());
@@ -1100,14 +1140,15 @@ function renderStateChips() {
     b.style.setProperty("--swatch", stateColour(st));
     b.setAttribute("aria-pressed", !S.hiddenStates.has(st));
     b.innerHTML = `${escapeHtml(st === NO_STATE ? "before start" : st)} <span class="n">${fmt.int(n)}</span>`;
-    b.title = "Include or exclude this state's pulses in both plots and the detector map";
-    b.onclick = () => { S.hiddenStates.has(st) ? S.hiddenStates.delete(st) : S.hiddenStates.add(st); S.gain = gainCheck(); render(); };
+    b.title = REPLAY ? "Include or exclude this state's pulses in the spectrum, the time plot and the detector map"
+      : "Include or exclude this state's pulses in the spectrum, the line fit, the time plot and the detector map, for everyone viewing";
+    b.onclick = () => setHiddenStates(S.hiddenStates.has(st) ? [...S.hiddenStates].filter(x => x !== st) : [...S.hiddenStates, st]);
     box.appendChild(b);
   }
   if (S.hiddenStates.size) {
     const all = document.createElement("button");
     all.textContent = "Include all states";
-    all.onclick = () => { S.hiddenStates.clear(); S.gain = gainCheck(); render(); };
+    all.onclick = () => setHiddenStates([]);
     box.appendChild(all);
   }
 }
@@ -1152,7 +1193,7 @@ function renderArray() {
   const key = document.getElementById("gridKey"), note = document.getElementById("metricNote");
   if (S.metric === "counts") {
     key.innerHTML = `<span>0</span><i style="background:linear-gradient(90deg,${[0, .25, .5, .75, 1].map(f => rgb(rampAt(RAMP, floor + (1 - floor) * f))).join(",")})"></i><span>${fmtRate(cmax / expo)} good pulses/s</span>`;
-    note.textContent = "Good pulses per second of measurement for each channel, in the states included below the spectrum. "
+    note.textContent = "Good pulses per second of measurement for each channel, in the states selected above the spectrum. "
       + "Copies at a different gain differ slightly from the channel they copy: a few pulses fall on the other side of their recipe's cuts or the energy range.";
   } else {
     key.innerHTML = `<span>−3%</span><i style="background:linear-gradient(90deg,${DIVERGING.map(rgb).join(",")})"></i><span>+3%</span>`;
@@ -1186,9 +1227,11 @@ function renderFit() {
   if (!F) return;
   const fits = F.fits || [], last = fits.at(-1), roi = F.roi || {};
   const big = bigEnergy(), e = v => fmt.energy(v, big);
+  const which = F.states == null ? "all states" : F.states.length ? `states ${F.states.join(", ")}` : "no states";
   document.getElementById("fitTitle").textContent = `Line fit: ${roi.label ?? "region of interest"}, all channels summed`;
   document.getElementById("fitDesc").textContent =
-    `The same fit as the original analysis (${roi.source || "linefit"}), but on all channels summed, all states. `
+    `The same fit as the original analysis (${roi.source || "linefit"}), but on all channels summed, ${which}`
+    + (REPLAY ? " (a recording keeps the fits it was made with). " : ", as selected above the spectrum; a new selection is fitted at once. ")
     + `It is redone at most every ${F.every_s ?? 10} s by mass2-live-fit, a separate process, so the analysis never waits for it.`;
   const params = document.getElementById("fitParams");
   if (!last) { params.innerHTML = `<dt>Status</dt><dd>Waiting for enough counts in the fit region.</dd>`; return; }
@@ -1325,10 +1368,30 @@ function animateLoop(lp) {
 // ======================================================================================
 // Rendering and interaction
 let geometry = null;
+// ---- resident memory (RSS) of each process involved, sampled by the server every 2 s (live server only)
+const fmtBytes = b => b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.round(b / 1e6)} MB`;
+const PROC_BOX = { "mass2-live-sim": "p-sim", "mass2-live-apply": "p-apply", "mass2-live-fit": "p-fit" };
+function renderMemory() {
+  const el = document.getElementById("memory"), P = S.processes;
+  el.hidden = !P?.length;
+  if (P?.length) {
+    const sum = P.reduce((a, p) => a + p.rss_bytes, 0);
+    el.innerHTML = `Memory in use (resident): ${P.map(p => `${escapeHtml(p.name)} <b>${fmtBytes(p.rss_bytes)}</b>`).join(" · ")} · total <b>${fmtBytes(sum)}</b>`;
+  }
+  for (const [name, id] of Object.entries(PROC_BOX)) {
+    const box = document.querySelector(`#${id} .name`), p = P?.find(q => q.name === name);
+    let tag = box.querySelector(".mem");
+    if (!p) { tag?.remove(); continue; }
+    if (!tag) { tag = document.createElement("span"); tag.className = "mem"; box.append(tag); }
+    tag.textContent = ` · ${fmtBytes(p.rss_bytes)} in memory`;
+  }
+}
+
 function render() {
   if (!S.meta) return;
   renderExplain();
   renderCounters();
+  renderMemory();
   if (S.tab === "spectra") {
     geometry = { spec: drawSpectrum(), fall: drawWaterfall() };
     renderFit();
