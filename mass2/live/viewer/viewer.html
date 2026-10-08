@@ -1,0 +1,1413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>mass2 live analysis</title>
+<style>
+  :root {
+    --paper: #f2f4f3; --ink: #1e2a32; --muted: #5f6c74; --rule: #d3d9dc; --panel: #ffffff; --focus: #0072b2;
+    --sum-fill: rgba(30, 42, 50, 0.12); --alert: #b3261e; --ramp-floor: 0; --lit: #0072b2; --lit-bg: #e3f0f9;
+    font-family: "IBM Plex Sans", "Source Sans 3", system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink); background: var(--paper);
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #12181c; --ink: #e3e8eb; --muted: #94a1a9; --rule: #2c363c; --panel: #192126; --focus: #56b4e9;
+      --sum-fill: rgba(227, 232, 235, 0.10); --alert: #ff8a80; --ramp-floor: 0.3; --lit: #56b4e9; --lit-bg: #1d3442;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #12181c; --ink: #e3e8eb; --muted: #94a1a9; --rule: #2c363c; --panel: #192126; --focus: #56b4e9;
+    --sum-fill: rgba(227, 232, 235, 0.10); --alert: #ff8a80; --ramp-floor: 0.3; --lit: #56b4e9; --lit-bg: #1d3442;
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  [hidden] { display: none !important; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); background: var(--paper); }
+  body {
+    margin: 0 auto; max-width: 1440px; background: var(--paper); line-height: 1.4;
+    padding: 16px max(20px, env(safe-area-inset-right, 0px)) 32px max(20px, env(safe-area-inset-left, 0px));
+  }
+  h1 { font-size: 1.375rem; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 1.0625rem; font-weight: 650; margin: 0; }
+  p { margin: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 0.8125rem; }
+
+  header.top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  #datasetLabel { display: flex; align-items: center; gap: 8px; font-size: 0.875rem; color: var(--muted); }
+  select { font: inherit; font-size: 0.9375rem; padding: 5px 8px; border: 1px solid var(--rule); border-radius: 4px; background: var(--panel); color: var(--ink); max-width: 100%; }
+  #speedLabel { display: flex; align-items: center; gap: 8px; font-size: 0.875rem; color: var(--muted); }
+  #speedLabel input { width: 140px; accent-color: var(--ink); }
+  #speedLabel output { min-width: 9ch; color: var(--ink); font-weight: 600; }
+  #explain { margin: 8px 0 14px; max-width: 80ch; font-size: 0.9375rem; color: var(--muted); }
+  #explain strong { color: var(--ink); font-weight: 600; }
+
+  /* counters */
+  #counters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .counter { background: var(--panel); padding: 10px 14px 12px; min-width: 0; transition: background-color 0.6s; }
+  .counter .label { font-size: 0.8125rem; color: var(--muted); }
+  .counter .value { font-size: 1.625rem; font-weight: 650; letter-spacing: -0.01em; line-height: 1.2; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .counter .value .unit { font-size: 0.875rem; font-weight: 500; color: var(--muted); margin-left: 4px; }
+  .counter .delta { font-size: 0.8125rem; color: var(--muted); min-height: 1.2em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .counter.bumped { background: var(--lit-bg); transition: none; }
+  .state-pill { display: inline-flex; align-items: center; gap: 8px; }
+  .state-pill::before { content: ""; width: 14px; height: 14px; border-radius: 3px; background: var(--swatch, var(--muted)); }
+
+  /* view switch */
+  nav.views { display: flex; gap: 0; margin: 16px 0 12px; border-bottom: 1px solid var(--rule); }
+  nav.views button { border: none; border-bottom: 3px solid transparent; border-radius: 0; background: none; font-size: 0.9375rem; padding: 8px 14px; color: var(--muted); }
+  nav.views button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+  #status { margin-left: auto; align-self: center; font-size: 0.8125rem; color: var(--muted); padding: 0 4px 6px; text-align: right; }
+  #status.alert { color: var(--alert); }
+
+  button {
+    font: inherit; font-size: 0.8125rem; padding: 5px 10px; min-height: 32px; border-radius: 4px; cursor: pointer;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--rule);
+  }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .seg { display: inline-flex; }
+  .seg button { border-radius: 0; margin-left: -1px; }
+  .seg button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 4px 4px 0; }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); border-color: var(--ink); position: relative; }
+
+  /* panels */
+  .spectra { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+  .plots { display: grid; gap: 16px; min-width: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 14px 10px; min-width: 0; }
+  .panel-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-start; justify-content: space-between; margin-bottom: 8px; }
+  .panel-head .desc { font-size: 0.875rem; color: var(--muted); max-width: 70ch; margin-top: 2px; }
+  .tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .tools .label { font-size: 0.8125rem; color: var(--muted); margin-right: 2px; }
+  canvas { display: block; width: 100%; cursor: crosshair; touch-action: pan-y; }
+  #spectrum { height: 340px; }
+  #waterfall { height: 420px; }
+  .zoombar { margin: 2px 0 0; }
+  .fitgrid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  #fitImg { width: 100%; height: auto; border: 1px solid var(--rule); border-radius: 4px; background: #fff; }
+  #fitParams { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0 0 10px; font-size: 0.875rem; }
+  #fitParams dt { color: var(--muted); }
+  #fitParams dd { margin: 0; }
+  #fitParams .big { font-size: 1.375rem; font-weight: 650; }
+  #fitTrend { height: 170px; cursor: default; }
+  @media (max-width: 760px) { .fitgrid { grid-template-columns: 1fr; } }
+  #zoomInfo b { color: var(--ink); font-weight: 600; }
+  .readout { min-height: 1.4em; font-size: 0.8125rem; color: var(--muted); margin-top: 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
+  .chips .label { font-size: 0.8125rem; color: var(--muted); margin-right: 2px; }
+  button.chip { display: inline-flex; align-items: center; gap: 6px; }
+  button.chip::before { content: ""; width: 12px; height: 12px; border-radius: 3px; background: var(--swatch); flex: none; }
+  button.chip[aria-pressed="false"] { color: var(--muted); }
+  button.chip[aria-pressed="false"]::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--swatch); }
+  button.chip .n { color: var(--muted); }
+  button.overlay::after { content: "×"; margin-left: 2px; color: var(--muted); font-size: 1rem; line-height: 1; }
+  .heat-key { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8125rem; color: var(--muted); }
+  .heat-key i { display: inline-block; width: 90px; height: 10px; border-radius: 2px;
+    background: linear-gradient(90deg, #00224e, #394870, #707173, #a89d71, #e6cd50, #fdea45); }
+
+  /* detector array */
+  .array-panel { position: sticky; top: 12px; }
+  #grid { display: grid; gap: 4px; margin: 10px 0 8px; }
+  #grid button.pixel {
+    aspect-ratio: 1; padding: 2px; min-height: 0; border: 2px solid transparent; border-radius: 5px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1;
+    color: var(--cell-ink, #fff); background: var(--cell, var(--rule)); position: relative;
+  }
+  #grid button.pixel .ch { font-size: 0.875rem; font-weight: 650; }
+  #grid button.pixel .v { font-size: 0.6875rem; opacity: 0.95; }
+  #grid button.pixel[data-real="true"]::after {
+    content: "real"; position: absolute; top: 2px; left: 3px; font-size: 0.5625rem; font-weight: 600; opacity: 0.85;
+  }
+  #grid button.pixel[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 3px var(--sel); }
+  #gridKey { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 0.75rem; color: var(--muted); }
+  #gridKey i { flex: 1; height: 10px; border-radius: 2px; }
+  #pixelDetail { margin-top: 10px; font-size: 0.8125rem; border-top: 1px solid var(--rule); padding-top: 8px; min-height: 3.2em; }
+  #pixelDetail dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+  #pixelDetail dt { color: var(--muted); }
+  #pixelDetail dd { margin: 0; }
+
+  /* pipeline view */
+  .pipeline { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  .col h3 { font-size: 0.875rem; font-weight: 600; color: var(--muted); margin: 0 0 8px; }
+  .file, .proc { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; transition: border-color 0.8s, background-color 0.8s; }
+  .file .name { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.875rem; font-weight: 600; word-break: break-all; }
+  .file .kind { font-size: 0.75rem; color: var(--muted); }
+  .file .stats { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 0.8125rem; }
+  .file .stats b { font-weight: 650; }
+  .file.written, .proc.running { border-color: var(--lit); background: var(--lit-bg); transition: none; }
+  .proc .name { font-weight: 650; }
+  .proc .what { font-size: 0.8125rem; color: var(--muted); margin-top: 2px; }
+  ol.steps { list-style: none; margin: 8px 0 0; padding: 0; counter-reset: step; }
+  ol.steps li { counter-increment: step; display: grid; grid-template-columns: 28px 1fr auto; gap: 2px 8px; align-items: start; padding: 8px 8px; border-radius: 5px; transition: background-color 0.6s; }
+  ol.steps li::before { content: counter(step); width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--rule); display: grid; place-items: center; font-size: 0.75rem; font-weight: 650; color: var(--muted); transition: all 0.6s; }
+  ol.steps li.lit { background: var(--lit-bg); transition: none; }
+  ol.steps li.lit::before { background: var(--lit); border-color: var(--lit); color: var(--panel); transition: none; }
+  ol.steps .t { font-weight: 600; font-size: 0.875rem; }
+  ol.steps .d { grid-column: 2 / 4; font-size: 0.8125rem; color: var(--muted); }
+  ol.steps .m { font-size: 0.8125rem; text-align: right; white-space: nowrap; }
+  .loopnote { font-size: 0.8125rem; color: var(--muted); padding: 8px 8px 2px; border-top: 1px dashed var(--rule); margin-top: 6px; }
+  .arrow { text-align: center; color: var(--muted); font-size: 0.8125rem; margin: -2px 0 8px; }
+  .flow-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rule); margin-right: 6px; vertical-align: middle; }
+  .flow-dot.on { background: var(--lit); animation: blink 0.9s ease-out; }
+  @keyframes blink { from { box-shadow: 0 0 0 6px var(--lit-bg); } to { box-shadow: 0 0 0 0 transparent; } }
+  @media (prefers-reduced-motion: reduce) {
+    .counter, .file, .proc, ol.steps li, ol.steps li::before { transition: none !important; }
+    .flow-dot.on { animation: none; }
+  }
+
+  @media (max-width: 1100px) {
+    .spectra { grid-template-columns: 1fr; }
+    .array-panel { position: static; order: -1; }
+    .pipeline { grid-template-columns: 1fr; }
+    #grid { max-width: 420px; }
+  }
+  @media (max-width: 760px) {
+    #counters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .counter .value { font-size: 1.375rem; }
+  }
+  @media (max-width: 640px) {
+    body { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
+    h1 { font-size: 1.1875rem; }
+    #spectrum { height: 280px; }
+    #waterfall { height: 380px; }
+    .panel { padding: 12px 10px 8px; }
+    .hint { display: none; }
+    #status { flex-basis: 100%; text-align: left; margin-left: 0; padding-top: 6px; }
+    nav.views { flex-wrap: wrap; }
+    #datasetLabel { flex-basis: 100%; min-width: 0; }
+    #datasetLabel select { flex: 1; min-width: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>mass2 live analysis</h1>
+  <label id="datasetLabel" hidden>Dataset <select id="datasetPicker"></select></label>
+  <label id="speedLabel" hidden>Playback speed
+    <input type="range" id="speed" min="0" max="8" step="1" value="2" aria-describedby="speedValue">
+    <output id="speedValue">5× real time</output>
+  </label>
+</header>
+<p id="explain">Waiting for the first results from mass2-live-apply…</p>
+
+<section id="counters" aria-label="Running totals">
+  <div class="counter" id="c-records"><div class="label">Pulse records processed</div><div class="value">—</div><div class="delta"></div></div>
+  <div class="counter" id="c-chunks"><div class="label">Chunks read</div><div class="value">—</div><div class="delta"></div></div>
+  <div class="counter" id="c-good"><div class="label">Good pulses histogrammed</div><div class="value">—</div><div class="delta"></div></div>
+  <div class="counter" id="c-rate"><div class="label">Processing rate</div><div class="value">—</div><div class="delta"></div></div>
+  <div class="counter" id="c-state"><div class="label">Experiment state now</div><div class="value">—</div><div class="delta"></div></div>
+  <div class="counter" id="c-clock"><div class="label">Time of newest pulse</div><div class="value">—</div><div class="delta"></div></div>
+</section>
+
+<nav class="views" role="tablist" aria-label="View">
+  <button role="tab" id="tab-spectra" aria-selected="true" aria-controls="view-spectra">Spectra</button>
+  <button role="tab" id="tab-pipeline" aria-selected="false" aria-controls="view-pipeline">Pipeline and files</button>
+  <span id="status"></span>
+</nav>
+
+<!-- ======================= Spectra view ======================= -->
+<main id="view-spectra" class="spectra" role="tabpanel" aria-labelledby="tab-spectra">
+  <div class="plots">
+    <section class="panel" aria-labelledby="specTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="specTitle">Energy spectrum</h2>
+          <p class="desc" id="specDesc">Good pulses from all channels, summed.</p>
+        </div>
+        <div class="tools">
+          <span class="label">Counts axis</span>
+          <span class="seg"><button id="logBtn" aria-pressed="true">Log</button><button id="linBtn" aria-pressed="false">Linear</button></span>
+        </div>
+      </div>
+      <div class="tools zoombar">
+        <span class="label">Energy axis</span>
+        <span class="seg">
+          <button id="panLeft" aria-label="Pan to lower energy">◀</button>
+          <button id="zoomOut" aria-label="Zoom out">− Zoom out</button>
+          <button id="zoomIn" aria-label="Zoom in">+ Zoom in</button>
+          <button id="panRight" aria-label="Pan to higher energy">▶</button>
+        </span>
+        <button id="resetBtn">Full range</button>
+      </div>
+      <p class="small muted" id="zoomInfo" style="margin:6px 0 2px"></p>
+      <div class="chips" id="overlayChips"></div>
+      <canvas id="spectrum" aria-label="Energy spectrum plot"></canvas>
+      <div class="readout" id="specReadout"><span class="hint">Zoom with the buttons, by dragging across an energy range, by pinching on a phone, or with a trackpad pinch (or Ctrl + scroll) on a computer.</span></div>
+    </section>
+
+    <section class="panel" id="fitPanel" aria-labelledby="fitTitle" hidden>
+      <div class="panel-head">
+        <div>
+          <h2 id="fitTitle">Line fit</h2>
+          <p class="desc" id="fitDesc"></p>
+        </div>
+        <div class="tools"><button id="fitZoom">Show the fit region in the spectrum</button></div>
+      </div>
+      <div class="fitgrid">
+        <img id="fitImg" alt="The latest fit, drawn by mass2's plotm: data points, fitted line shape, and fit parameters">
+        <div>
+          <dl id="fitParams"></dl>
+          <canvas id="fitTrend" aria-label="Resolution of each refit over time"></canvas>
+          <p class="small muted">Resolution (FWHM) from each refit, with ±1σ bars. It should settle as counts build up.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="fallTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="fallTitle">Energy vs time, with the experiment state</h2>
+          <p class="desc" id="fallDesc">Each row is one time slice, newest at the top. The column on the left shows which experiment state the instrument was in.</p>
+        </div>
+        <span class="heat-key">fewer <i></i> more counts</span>
+      </div>
+      <div class="chips" id="stateChips"><span class="label">States included in both plots:</span></div>
+      <canvas id="waterfall" aria-label="Energy versus time plot"></canvas>
+      <div class="readout" id="fallReadout"></div>
+    </section>
+  </div>
+
+  <aside class="panel array-panel" aria-labelledby="arrayTitle">
+    <h2 id="arrayTitle">Detector array</h2>
+    <p class="desc small muted" id="arrayDesc">Each square is one detector channel, drawn at its position in the array. Tap squares to overlay their spectra.</p>
+    <div class="tools" style="margin-top:8px">
+      <span class="label">Colour by</span>
+      <span class="seg"><button id="mCounts" aria-pressed="true">Good pulses</button><button id="mGain" aria-pressed="false">Energy-scale check</button></span>
+    </div>
+    <div id="grid" role="group" aria-label="Detector channels"></div>
+    <div id="gridKey"></div>
+    <p class="small muted" id="metricNote" style="margin-top:6px"></p>
+    <div id="pixelDetail"></div>
+  </aside>
+</main>
+
+<!-- ======================= Pipeline view ======================= -->
+<main id="view-pipeline" class="pipeline" role="tabpanel" aria-labelledby="tab-pipeline" hidden>
+  <div class="col">
+    <h3>On disk before the run</h3>
+    <div class="file" id="f-ljh"><div class="kind">Detector data, original</div><div class="name">*.ljh</div><div class="stats"></div></div>
+    <div class="file" id="f-recipe"><div class="kind">Saved recipe, loaded once at start</div><div class="name"></div><div class="stats"></div></div>
+    <div class="arrow">↓ read by</div>
+    <div class="proc" id="p-sim"><div class="name">mass2-live-sim</div><div class="what"></div></div>
+    <div class="arrow">↓ appends to</div>
+    <div class="file" id="f-input"><div class="kind">Raw pulses, Arrow IPC stream, growing</div><div class="name">pulses.arrows</div><div class="stats"></div></div>
+    <div class="file" id="f-statesfile"><div class="kind">Experiment state log, text, growing</div><div class="name">pulses_experiment_state.txt</div><div class="stats"></div></div>
+  </div>
+
+  <div class="col">
+    <h3>The loop in mass2-live-apply</h3>
+    <div class="proc" id="p-apply">
+      <div class="name"><span class="flow-dot" id="loopDot"></span>mass2-live-apply</div>
+      <div class="what" id="applyWhat"></div>
+      <ol class="steps" id="steps">
+        <li data-step="read"><span class="t">Read new chunks</span><span class="m"></span><span class="d">Take every complete record batch appended to pulses.arrows since the last poll.</span></li>
+        <li data-step="label"><span class="t">Label experiment states</span><span class="m"></span><span class="d">Re-read the state log and tag each record with the state in effect at its timestamp.</span></li>
+        <li data-step="recipe"><span class="t">Apply the recipe, per channel</span><span class="m"></span><span class="d" id="recipeSteps"></span></li>
+        <li data-step="write"><span class="t">Write results</span><span class="m"></span><span class="d">One output batch per input chunk, same rows and chunk numbers, to analyzed.arrows.</span></li>
+        <li data-step="histogram"><span class="t">Histogram good pulses</span><span class="m"></span><span class="d">Add each good pulse's energy to its channel and state; finished time slices are appended to histograms.arrows.</span></li>
+        <li data-step="publish"><span class="t">Publish for the viewer</span><span class="m"></span><span class="d">Rewrite the open slice, the state timeline and the counters you see at the top of this page.</span></li>
+      </ol>
+      <p class="loopnote" id="loopNote">↻ then wait and poll again</p>
+    </div>
+  </div>
+
+  <div class="col">
+    <h3>Written by the loop</h3>
+    <div class="file" id="f-output"><div class="kind">Per-pulse results, Arrow IPC stream</div><div class="name">analyzed.arrows</div><div class="stats"></div></div>
+    <div class="file" id="f-hist"><div class="kind">Finished time slices, Arrow IPC stream</div><div class="name">hist/histograms.arrows</div><div class="stats"></div></div>
+    <div class="file" id="f-current"><div class="kind">Slice still filling, rewritten each poll</div><div class="name">hist/histograms_current.arrows</div><div class="stats"></div></div>
+    <div class="file" id="f-states"><div class="kind">State changes seen so far</div><div class="name">hist/states.json</div><div class="stats"></div></div>
+    <div class="file" id="f-status"><div class="kind">Counters for this page</div><div class="name">hist/status.json</div><div class="stats"></div></div>
+    <div class="arrow">↓ histograms.arrows is also read by</div>
+    <div class="proc" id="p-fit"><div class="name">mass2-live-fit (separate process)</div><div class="what" id="fitWhat"></div></div>
+    <div class="file" id="f-fits"><div class="kind">Every fit so far, and the latest plotm image</div><div class="name">hist/fits/fits.json, hist/fits/latest.png</div><div class="stats"></div></div>
+    <div class="arrow">↓ all read by</div>
+    <div class="proc" id="p-view"><div class="name">This page</div><div class="what" id="viewWhat"></div></div>
+  </div>
+</main>
+
+<!-- replay data -->
+<script>
+"use strict";
+// ======================================================================================
+// Colours
+const CHANNEL_COLOURS = ["#0072b2", "#d55e00", "#009e73", "#cc79a7", "#e69f00", "#56b4e9"];  // Okabe–Ito
+const STATE_COLOURS = ["#4e79a7", "#e15759", "#59a14f", "#b07aa1", "#f28e2b", "#76b7b2", "#9c755f", "#edc948"];
+const NO_STATE = "(none)", NO_STATE_COLOUR = "#b8c0c4";
+const RAMP = [[0, 34, 78], [57, 72, 108], [112, 113, 115], [168, 157, 113], [230, 205, 80], [253, 234, 69]];  // cividis-like
+const DIVERGING = [[33, 102, 172], [146, 197, 222], [236, 236, 236], [244, 165, 130], [178, 24, 43]];  // blue – neutral – red
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+let INK, MUTED, RULE, PANEL;
+function readTheme() { INK = css("--ink"); MUTED = css("--muted"); RULE = css("--rule"); PANEL = css("--panel"); }
+readTheme();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readTheme(); render(); });
+const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function rampAt(stops, f) {
+  const x = Math.min(1, Math.max(0, f)) * (stops.length - 1), k = Math.min(stops.length - 2, Math.floor(x)), t = x - k;
+  return stops[k].map((v, j) => Math.round(v + t * (stops[k + 1][j] - v)));
+}
+const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+const inkOn = c => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) > 150 ? "#1e2a32" : "#ffffff";
+
+// ======================================================================================
+// Formatting: one set of formatters so every view shows the same numbers the same way
+const fmt = {
+  int: n => n == null ? "—" : Math.round(n).toLocaleString("en-US"),
+  plus: n => n > 0 ? `+${Math.round(n).toLocaleString("en-US")}` : "no change",
+  bytes(n) {
+    if (n == null) return "—";
+    const u = ["B", "kB", "MB", "GB"]; let i = 0;
+    while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+    return `${n.toFixed(n < 10 && i ? 1 : 0)} ${u[i]}`;
+  },
+  clock: t => new Date(t * 1000).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+  pct: x => `${x > 0 ? "+" : x < 0 ? "−" : ""}${Math.abs(x).toFixed(1)}%`,
+  energy(e, big) { return big ? `${(e / 1000).toFixed(2)} keV` : `${e.toFixed(1)} eV`; },
+  ms: x => x == null ? "" : x < 10 ? `${x.toFixed(1)} ms` : `${Math.round(x)} ms`,
+};
+
+// ======================================================================================
+// State
+const S = {
+  run: null, meta: null, slices: [], current: [], channels: [], status: null, controller: null,
+  timeline: [], stateNames: [], hiddenStates: new Set(), overlay: [], metric: "counts", log: true, view: null,
+  tab: "spectra", detail: null, fits: null,
+  prev: null,          // previous status, for "+N since last update" and the rate
+  rate: null,
+  gain: {},            // channel -> apparent gain (fraction) or null
+};
+const REPLAY = window.MASS2_REPLAY ? makeReplay(window.MASS2_REPLAY) : null;
+const POLL_MS = REPLAY ? 500 : 2000;  // a replay ticks once per recorded poll of mass2-live-apply
+
+// ======================================================================================
+// Replay of a recorded run (pages made by mass2-live-export): answers like the server's /api/state.
+function makeReplay(data) {
+  // A recording holds the slices mass2-live-apply finished, with their original timestamps:
+  // [seconds after t0, records, chunks, {state: {channel: [bin gap, count, ...]}}]. Playing it at `speed`
+  // times real time hands the page the same answers the live server would give at that moment.
+  const byKey = Object.fromEntries(data.datasets.map(d => [d.key, d]));
+  for (const d of data.datasets) {  // running totals after each slice, so any moment's counters are exact
+    let r = 0, c = 0, g = 0;
+    d.cum = [[0, 0, 0]];
+    for (const [, recs, chunks, sp] of d.slices) {
+      r += recs; c += chunks;
+      for (const chans of Object.values(sp)) for (const pairs of Object.values(chans)) for (let k = 1; k < pairs.length; k += 2) g += pairs[k];
+      d.cum.push([r, c, g]);
+    }
+    d.duration = d.slices.length * d.meta.slice_s;
+    d.firstT = (d.slices.find(([, recs]) => recs > 0) ?? [0])[0];
+  }
+  let active = data.datasets[0].key, run = 1, speed = 5, virt = 0, lastWall = Date.now();
+  const tick = () => { const now = Date.now(); virt += (now - lastWall) / 1000 * speed; lastWall = now; return virt; };
+  const restart = () => { virt = 0; lastWall = Date.now(); run += 1; };
+
+  return {
+    speeds: [1, 2, 5, 10, 30, 60, 120, 300, 600],
+    get speed() { return speed; },
+    setSpeed(x) { tick(); speed = x; },
+    switch(key) { if (byKey[key]) { active = key; restart(); } },
+    state(since) {
+      const d = byKey[active], t0 = d.meta.t0, sl = d.meta.slice_s;
+      let elapsed = tick();
+      if (elapsed > d.duration + sl) { restart(); elapsed = 0; }  // loop
+      const nDone = Math.min(d.slices.length, Math.floor(elapsed / sl));
+      const [records, chunks, good] = d.cum[nDone], bpc = d.meta.bytes_per_chunk;
+      const states = d.states.filter(([t]) => t <= elapsed).map(([t, l]) => [t0 + t, l]);
+      return {
+        run, meta: d.meta, n_slices: nDone, states, current: [],
+        slices: d.slices.slice(since, nDone).map(([t, , , counts]) => ({ t: t0 + t, counts })),
+        channels: Object.keys(d.meta.layout).sort((a, b) => a - b),
+        status: {
+          records, chunks, polls: nDone, good_pulses: good, late_records: 0, channels_without_recipe: [],
+          input_bytes: Math.round(chunks * bpc.input), output_bytes: Math.round(chunks * bpc.output),
+          state_changes: states.length, stream_ended: false, updated_unix_s: Date.now() / 1000,
+          first_data_us: (t0 + d.firstT) * 1e6, latest_data_us: (t0 + Math.min(elapsed, d.duration)) * 1e6,
+          last_poll: { new_chunks: nDone ? d.slices[nDone - 1][2] : 0 },
+        },
+        controller: { datasets: data.datasets.map(x => ({ key: x.key, title: x.title })), active, phase: "running", speed },
+        fits: { ...d.fits, fits: d.fits.fits.filter(f => f.t <= elapsed).map(f => ({ ...f, t: t0 + f.t })) },
+      };
+    },
+  };
+}
+
+// ---- one playback-speed control: the recording's speed here, the real simulator's in mass2-live-demo
+function setupSpeed() {
+  const label = document.getElementById("speedLabel"), input = document.getElementById("speed"), out = document.getElementById("speedValue");
+  const speeds = [1, 2, 5, 10, 30, 60, 120, 300, 600];
+  const show = x => { out.textContent = `${x}× real time`; input.value = String(Math.max(0, speeds.indexOf(x))); };
+  input.max = String(speeds.length - 1);
+  input.addEventListener("input", async () => {
+    const x = speeds[Number(input.value)];
+    show(x);
+    if (REPLAY) REPLAY.setSpeed(x);
+    else await fetch("api/speed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ speed: x }) });
+    render();
+  });
+  return { label, show };
+}
+const SPEED = setupSpeed();
+function currentSpeed() { return REPLAY ? REPLAY.speed : (S.controller?.speed ?? 1); }
+
+// ======================================================================================
+// Data in
+async function poll() {
+  try {
+    const since = S.slices.length;
+    const s = REPLAY ? REPLAY.state(since) : await (await fetch(`api/state?since=${since}`, { cache: "no-store" })).json();
+    if (s.run !== S.run) {
+      resetData(s.run);
+      if (since > 0) { setTimeout(poll, 0); return; }  // a new run: ask again from the start
+    }
+    ingest(s);
+  } catch (e) {
+    setStatus("Cannot reach the viewer server. Check that mass2-live-demo or mass2-live-view is still running.", true);
+  }
+  setTimeout(poll, POLL_MS);
+}
+
+// Slices arrive sparse: {t, counts: {state: {channel: [bin gap, count, ...]}}}. Each finished slice is added once
+// into running totals (for the spectrum and the map) and kept sparse (for the time plot). The slice still
+// filling (live server only) is decoded fresh on each update.
+const T = { byState: {}, stateSum: {} };
+function decodeInto(target, pairs) { for (let q = 0, i = 0; q < pairs.length; q += 2) { i += pairs[q]; target[i] += pairs[q + 1]; } }
+function addToTotals(counts) {
+  const nb = S.meta.nbins;
+  for (const [st, chans] of Object.entries(counts)) for (const [ch, pairs] of Object.entries(chans)) {
+    decodeInto(((T.byState[st] ??= {})[ch] ??= new Float32Array(nb)), pairs);
+    decodeInto((T.stateSum[st] ??= new Float32Array(nb)), pairs);
+  }
+}
+function decodeOpen(slice) {  // the open slice, dense, by state and channel, for sumAll
+  const nb = S.meta.nbins, row = { t: slice.t, stateSum: {}, byState: {} };
+  for (const [st, chans] of Object.entries(slice.counts)) for (const [ch, pairs] of Object.entries(chans)) {
+    decodeInto((row.stateSum[st] ??= new Float32Array(nb)), pairs);
+    decodeInto(((row.byState[st] ??= {})[ch] = new Float32Array(nb)), pairs);
+  }
+  return row;
+}
+
+function resetData(run) {
+  Object.assign(S, { run, meta: null, slices: [], current: [], channels: [], timeline: [], stateNames: [], view: null,
+    overlay: [], detail: null, prev: null, rate: null, gain: {}, status: null, rowCache: null });
+  T.byState = {}; T.stateSum = {};
+  S.hiddenStates.clear();
+}
+
+function ingest(s) {
+  S.controller = s.controller;
+  showDatasets();
+  if (s.meta) {
+    if (!S.meta) { S.meta = s.meta; S.view = [s.meta.e_lo, s.meta.e_hi]; }
+    for (const sl of s.slices) { addToTotals(sl.counts); S.slices.push(sl); }
+    S.current = s.current.map(decodeOpen);
+    S.timeline = s.states;
+    S.fits = s.fits || null;
+    S.channels = s.channels;
+    noteStates(s);
+    const st = s.status;
+    if (st && S.status && st.updated_unix_s > S.status.updated_unix_s) {
+      const r = (st.records - S.status.records) / (st.updated_unix_s - S.status.updated_unix_s);
+      S.rate = S.rate == null ? r : 0.6 * S.rate + 0.4 * r;
+    }
+    S.prev = S.status;
+    S.status = st;
+    if (!S.prev || !st || st.good_pulses !== S.prev.good_pulses || !Object.keys(S.gain).length) S.gain = gainCheck();
+    SPEED.label.hidden = !(REPLAY || S.controller);
+    if (document.activeElement !== document.getElementById("speed")) SPEED.show(currentSpeed());
+    render();
+    if (st && (!S.prev || st.polls !== S.prev.polls)) animateLoop(st.last_poll);
+  }
+  showStatus();
+}
+
+// ---- time-plot rows: groups of consecutive slices, sized so a row fills in ~12 s of wall time at the
+// current playback speed (never shorter than one slice). Finished rows are built once and kept.
+const ROW_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 21600, 43200];
+function rowLength() {
+  const base = S.meta.slice_s, want = currentSpeed() * 12;
+  const nice = ROW_STEPS.find(x => x >= want) ?? want;
+  return Math.max(1, Math.round(nice / base)) * base;
+}
+function timeRows() {
+  const len = rowLength(), base = S.meta.slice_s;
+  if (!S.slices.length && !S.current.length) return { len, rows: [] };
+  if (!S.rowCache || S.rowCache.len !== len) {
+    const first = (S.slices[0] ?? S.current[0]).t;
+    S.rowCache = { len, origin: Math.floor(first / len) * len, done: [], next: 0 };
+  }
+  const C = S.rowCache, nb = S.meta.nbins, rowOf = t => Math.floor((t - C.origin) / len + 1e-9);
+  const dataEnd = S.slices.length ? S.slices.at(-1).t + base : C.origin;
+  const firstOpenRow = rowOf(dataEnd);  // rows before this one have all their slices
+  const build = (k, members) => {
+    const row = { t: C.origin + k * len, stateSum: {}, live: false };
+    for (const sl of members) for (const [st, chans] of Object.entries(sl.counts)) for (const pairs of Object.values(chans)) decodeInto((row.stateSum[st] ??= new Float32Array(nb)), pairs);
+    return row;
+  };
+  // finish rows that are now complete
+  let i = C.next;
+  while (i < S.slices.length && rowOf(S.slices[i].t) < firstOpenRow) {
+    const k = rowOf(S.slices[i].t), members = [];
+    while (i < S.slices.length && rowOf(S.slices[i].t) === k) members.push(S.slices[i++]);
+    C.done.push(build(k, members));
+  }
+  C.next = i;
+  // the row still filling: its finished slices, plus the slice the server is still filling
+  const rows = [...C.done];
+  const open = build(firstOpenRow, S.slices.slice(C.next));
+  for (const cur of S.current) for (const [st, a] of Object.entries(cur.stateSum)) { const t = (open.stateSum[st] ??= new Float32Array(nb)); for (let j = 0; j < nb; j++) t[j] += a[j]; }
+  open.live = true;
+  rows.push(open);
+  return { len, rows };
+}
+
+// ======================================================================================
+// Derived quantities (shared by every view)
+const visibleStates = () => S.stateNames.filter(st => !S.hiddenStates.has(st));
+const total = a => { let t = 0; for (const v of a) t += v; return t; };
+const bigEnergy = () => S.meta && S.meta.e_hi >= 20000;
+const energyUnit = () => bigEnergy() ? "keV" : "eV";
+
+function noteStates() {
+  const seen = new Set(S.stateNames);
+  const add = st => { if (!seen.has(st)) { seen.add(st); S.stateNames.push(st); } };
+  for (const [, label] of S.timeline) add(label);
+  for (const st of Object.keys(T.stateSum)) add(st);
+  for (const r of S.current) for (const st of Object.keys(r.stateSum)) add(st);
+}
+
+// Good pulses at the finest bin size, summed over all time: running totals plus the open slice.
+// chans = null means all channels.
+function sumAll(chans, states) {
+  const out = new Float32Array(S.meta.nbins);
+  const add = a => { if (a) for (let i = 0; i < a.length; i++) out[i] += a[i]; };
+  for (const st of states) {
+    if (chans == null) { add(T.stateSum[st]); for (const r of S.current) add(r.stateSum[st]); continue; }
+    for (const ch of chans) { add(T.byState[st]?.[ch]); for (const r of S.current) add(r.byState[st]?.[ch]); }
+  }
+  return out;
+}
+function rowSum(row, states) {
+  const out = new Float32Array(S.meta.nbins);
+  for (const st of states) { const a = row.stateSum[st]; if (a) for (let i = 0; i < a.length; i++) out[i] += a[i]; }
+  return out;
+}
+
+// ---- rates: counts per second of measurement (data time), so the playback speed never changes them. With a state filter, the time is the time spent in those states.
+function exposureS(states) {
+  const st = S.status;
+  if (!st?.first_data_us || !st.latest_data_us) return null;
+  const a = st.first_data_us / 1e6, b = st.latest_data_us / 1e6, tl = S.timeline;
+  const spans = [[a, tl.length ? tl[0][0] : b, NO_STATE], ...tl.map(([t, l], k) => [t, k + 1 < tl.length ? tl[k + 1][0] : b, l])];
+  let secs = 0;
+  for (const [t0, t1, l] of spans) if (states.includes(l)) secs += Math.max(0, Math.min(t1, b) - Math.max(t0, a));
+  return secs;
+}
+function fmtRate(r) {
+  if (r == null || !isFinite(r)) return "—";
+  if (r === 0) return "0";
+  if (r >= 100) return fmt.int(r);
+  if (r >= 1) return r.toFixed(r >= 10 ? 1 : 2);
+  return r.toPrecision(2);
+}
+const fmtDuration = s => s >= 3600 ? `${+(s / 3600).toFixed(2)} h` : s >= 60 ? `${+(s / 60).toFixed(1)} min` : `${+s.toFixed(1)} s`;
+
+// ---- display binning: coarse at full range, finer as you zoom, never finer than the stored bins
+const NICE = [1, 2, 4, 5, 10, 20, 25, 40, 50, 100, 200, 250, 400, 500, 1000, 2000, 2500, 5000, 10000];
+function displayBinning(pw) {
+  const m = S.meta, w = m.bin_width, n = (S.view[1] - S.view[0]) / w;
+  const want = Math.max(1, Math.ceil(n / Math.max(120, pw / 2.5)));  // at least ~2.5 px per bin
+  const f = NICE.find(k => k >= want) ?? want;
+  const dw = f * w;
+  const j0 = Math.max(0, Math.floor((S.view[0] - m.e_lo) / dw)), j1 = Math.min(Math.ceil(m.nbins / f), Math.ceil((S.view[1] - m.e_lo) / dw));
+  return { f, dw, j0, j1 };
+}
+function rebin(base, f, j0, j1) {
+  const out = new Float32Array(Math.max(0, j1 - j0));
+  for (let j = j0; j < j1; j++) { let acc = 0; const end = Math.min(base.length, (j + 1) * f); for (let i = j * f; i < end; i++) acc += base[i]; out[j - j0] = acc; }
+  return out;
+}
+const fmtWidth = dw => dw >= 1000 ? `${+(dw / 1000).toPrecision(3)} keV` : `${+dw.toPrecision(3)} eV`;
+
+function stateAt(t) {
+  let label = NO_STATE;
+  for (const [ts, l] of S.timeline) { if (ts <= t) label = l; else break; }
+  return label;
+}
+const stateColour = st => st === NO_STATE ? NO_STATE_COLOUR
+  : STATE_COLOURS[S.stateNames.filter(s => s !== NO_STATE).indexOf(st) % STATE_COLOURS.length];
+const overlayColour = ch => CHANNEL_COLOURS[S.overlay.indexOf(ch) % CHANNEL_COLOURS.length];
+
+function layout() {
+  const L = S.meta.layout;
+  if (L) return L;
+  const n = S.channels.length, nx = Math.ceil(Math.sqrt(n)), out = {};  // no layout given: a plain square grid
+  S.channels.forEach((ch, k) => { out[ch] = { x: k % nx, y: Math.floor(k / nx), copy_of: null, gain: 1 }; });
+  return out;
+}
+
+// Energy-scale check: for each channel, the stretch s at which channel(E·s) best matches the array sum(E),
+// searched over 0.95–1.05. It is estimated separately in 5 energy windows holding equal shares of the counts,
+// and the median is reported, so one feature that does not move with gain (such as a pile-up where the
+// calibration runs past its last line) cannot dominate. A channel whose calibration agrees with the array reads 0.
+const SCALES = Array.from({ length: 201 }, (_, k) => 0.95 + 0.0005 * k);
+function gainCheck() {
+  if (!S.meta) return {};
+  const states = visibleStates(), lo = S.meta.e_lo, f = Math.max(1, Math.round(S.meta.nbins / 1200));
+  const nb = Math.floor(S.meta.nbins / f), w = S.meta.bin_width * f;  // match line positions on ~1200 bins
+  const smoothLog = a => {  // light smoothing, then log, so strong lines don't swamp weak ones
+    const out = new Float64Array(nb);
+    for (let i = 0; i < nb; i++) {
+      let acc = 0, wt = 0;
+      for (let k = -3; k <= 3; k++) { const j = i + k; if (j < 0 || j >= nb) continue; const g = Math.exp(-k * k / 4.5); acc += g * a[j]; wt += g; }
+      out[i] = Math.log1p(acc / wt);
+    }
+    return out;
+  };
+  const refRaw = rebin(sumAll(null, states), f, 0, nb), ref = smoothLog(refRaw), refTotal = total(refRaw);
+  if (refTotal < 1000) return {};
+  // window edges at 5%, 23%, 41%, 59%, 77%, 95% of the counts
+  const edges = [], targets = [0.05, 0.23, 0.41, 0.59, 0.77, 0.95];
+  for (let i = 0, cum = 0, t = 0; i < nb && t < targets.length; i++) {
+    cum += refRaw[i];
+    while (t < targets.length && cum >= targets[t] * refTotal) { edges.push(i); t++; }
+  }
+  const out = {};
+  for (const ch of S.channels) {
+    const raw = rebin(sumAll([ch], states), f, 0, nb);
+    if (total(raw) < 300) { out[ch] = null; continue; }
+    const c = smoothLog(raw), bests = [];
+    for (let wdx = 0; wdx + 1 < edges.length; wdx++) {
+      const a = edges[wdx], b = edges[wdx + 1];
+      if (b - a < 5) continue;
+      let mean = 0;
+      for (let i = a; i < b; i++) mean += ref[i];
+      mean /= b - a;
+      let best = -Infinity, bestS = 1;
+      for (const sc of SCALES) {
+        let acc = 0;
+        for (let i = a; i < b; i++) {
+          const E = lo + (i + 0.5) * w, x = (E * sc - lo) / w - 0.5, j = Math.floor(x), f = x - j;
+          if (j < 0 || j + 1 >= nb) continue;
+          acc += ((1 - f) * c[j] + f * c[j + 1]) * (ref[i] - mean);
+        }
+        if (acc > best) { best = acc; bestS = sc; }
+      }
+      bests.push(bestS);
+    }
+    bests.sort((x, y) => x - y);
+    out[ch] = bests.length ? bests[Math.floor(bests.length / 2)] - 1 : null;
+  }
+  return out;
+}
+
+// ======================================================================================
+// Header, counters, status
+function showDatasets() {
+  const label = document.getElementById("datasetLabel"), picker = document.getElementById("datasetPicker"), c = S.controller;
+  label.hidden = !c;
+  if (!c) return;
+  const keys = c.datasets.map(d => d.key).join();
+  if (picker.dataset.keys !== keys) {
+    picker.replaceChildren(...c.datasets.map(d => new Option(d.title, d.key)));
+    picker.dataset.keys = keys;
+  }
+  if (document.activeElement !== picker) picker.value = c.active;
+}
+document.getElementById("datasetPicker").onchange = async e => {
+  setStatus(`Switching to ${e.target.selectedOptions[0].text}…`, false);
+  if (REPLAY) REPLAY.switch(e.target.value);
+  else await fetch("api/dataset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: e.target.value }) });
+};
+
+function setStatus(text, alert) {
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.classList.toggle("alert", !!alert);
+}
+
+function showStatus() {
+  const st = S.status, c = S.controller;
+  if (c && c.phase !== "running") return setStatus(`${c.phase}…`);
+  if (!st) return setStatus(REPLAY ? "" : "Waiting for the first processed chunks…");
+  const age = Date.now() / 1000 - st.updated_unix_s, notes = [];
+  if (st.late_records) notes.push(`${fmt.int(st.late_records)} late records dropped`);
+  if (st.channels_without_recipe.length) notes.push(`no recipe for ch ${st.channels_without_recipe.join(", ")}`);
+  if (st.stream_ended) notes.push("input stream finished");
+  else if (age > 5) notes.push(`no update from mass2-live-apply for ${age.toFixed(0)} s`);
+  setStatus(notes.join(" · ") || (REPLAY ? "Playing back a recording" : `Live, updated ${fmt.clock(st.updated_unix_s)}`), !st.stream_ended && age > 5);
+}
+
+function setCounter(id, valueHtml, delta, bumped) {
+  const el = document.getElementById(id);
+  el.querySelector(".value").innerHTML = valueHtml;
+  el.querySelector(".delta").textContent = delta;
+  if (bumped && !REDUCED_MOTION) {
+    el.classList.add("bumped");
+    setTimeout(() => el.classList.remove("bumped"), 60);
+  }
+}
+
+function renderCounters() {
+  const st = S.status, p = S.prev;
+  if (!st) return;
+  const lp = st.last_poll || {};
+  setCounter("c-records", fmt.int(st.records), `${fmt.plus(st.records - (p?.records ?? 0))} this update`, p && st.records > p.records);
+  setCounter("c-chunks", fmt.int(st.chunks), `${fmt.plus(st.chunks - (p?.chunks ?? 0))} this update`, p && st.chunks > p.chunks);
+  const share = st.records ? 100 * st.good_pulses / st.records : 0;
+  setCounter("c-good", fmt.int(st.good_pulses), `${share.toFixed(0)}% of all records`, p && st.good_pulses > p.good_pulses);
+  setCounter("c-rate", S.rate == null ? "—" : `${fmt.int(S.rate)}<span class="unit">records/s</span>`,
+    REPLAY ? "of playback (wall clock)" : `${fmt.int(lp.new_chunks ?? 0)} chunks last poll`, false);
+  const latest = st.latest_data_us ? st.latest_data_us / 1e6 : null;
+  if (latest) {
+    const now = stateAt(latest), since = [...S.timeline].reverse().find(([t]) => t <= latest);
+    setCounter("c-state", `<span class="state-pill" style="--swatch:${stateColour(now)}">${escapeHtml(now)}</span>`,
+      since ? `since ${fmt.clock(since[0])}` : "no state log yet", p && stateAt(p.latest_data_us / 1e6) !== now);
+    const day = new Date(latest * 1000).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+    setCounter("c-clock", fmt.clock(latest), REPLAY
+      ? `${day}, original time, playing ${currentSpeed()}× real time`
+      : S.controller ? `original time, simulator playing ${currentSpeed()}× real time` : "from pulse timestamps", false);
+  }
+}
+
+const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function renderExplain() {
+  const el = document.getElementById("explain");
+  if (!S.meta) return;
+  const n = S.channels.length, real = Object.values(layout()).filter(p => p.copy_of == null).length;
+  const source = REPLAY
+    ? `<strong>Playing back a recorded run</strong> of the mass2 live pipeline, with the original times, at ${document.getElementById("speedValue").textContent} (set it with Playback speed; it loops).`
+    : "<strong>Live:</strong> mass2-live-apply is analysing pulses as they are written; this page refreshes every 2 s.";
+  el.innerHTML = `${source} Raw detector pulses from ${fmt.int(n)} channels (${real} real, ${n - real} simulated copies) are turned `
+    + `into energies by a saved mass2 recipe, then histogrammed. The spectra show only <em>good</em> pulses: ones that pass the recipe's quality cuts.`;
+}
+
+// ======================================================================================
+// Spectra view
+function margins(canvasId) {
+  const narrow = innerWidth < 640;
+  // Both plots share left/right margins so their energy axes line up.
+  const left = narrow ? 112 : 158;
+  return { left, right: narrow ? 8 : 14, top: canvasId === "waterfall" ? 24 : 10, bottom: 46,
+           font: narrow ? 10.5 : 12, state: narrow ? 46 : 72, tickw: narrow ? 48 : 80, narrow };
+}
+
+function setup(canvas) {
+  const dpr = window.devicePixelRatio || 1, m = margins(canvas.id);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = `${m.font}px system-ui, sans-serif`;
+  const pw = w - m.left - m.right, ph = h - m.top - m.bottom;
+  const xOf = e => m.left + pw * (e - S.view[0]) / (S.view[1] - S.view[0]);
+  return { ctx, w, h, pw, ph, m, xOf };
+}
+
+function niceTicks(lo, hi, n) {
+  const step0 = (hi - lo) / n, mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 5, 10].map(k => k * mag).find(s => s >= step0);
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) ticks.push(+v.toPrecision(12));
+  return ticks;
+}
+
+function energyAxis(g) {
+  const { ctx, h, m, pw, xOf } = g, scale = bigEnergy() ? 1000 : 1;
+  ctx.fillStyle = MUTED; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  ctx.fillRect(m.left, h - m.bottom, pw, 1);
+  for (const e of niceTicks(S.view[0], S.view[1], Math.max(3, pw / 90))) {
+    const x = xOf(e);
+    ctx.fillRect(x, h - m.bottom, 1, 5);
+    ctx.fillText(+(e / scale).toPrecision(6), x, h - m.bottom + 7);
+  }
+  ctx.fillStyle = INK;
+  ctx.fillText(`Energy (${energyUnit()})`, m.left + pw / 2, h - m.bottom + 25);
+}
+
+function drawSpectrum() {
+  const g = setup(document.getElementById("spectrum"));
+  const { ctx, pw, ph, m, xOf } = g, meta = S.meta, states = visibleStates();
+  const bins = displayBinning(pw), { f, dw, j0, j1 } = bins;
+  const expo = exposureS(states) || 1, perS = 1 / expo;  // counts -> counts per second of measurement
+  const sumBase = sumAll(null, states), sumTotal = total(sumBase), sum = rebin(sumBase, f, j0, j1).map(v => v * perS);
+  const overlays = S.overlay.map(ch => {
+    const base = sumAll([ch], states), t = total(base), scale = t ? sumTotal / t : 0;
+    return { ch, data: rebin(base, f, j0, j1).map(v => v * scale * perS), factor: scale, n: t };
+  });
+  const yfloor = 0.5 * perS;  // half a count, as a rate: the bottom of the log axis
+  let ymax = 2 * yfloor;
+  for (const arr of [sum, ...overlays.map(o => o.data)]) for (const v of arr) ymax = Math.max(ymax, v);
+  ymax *= 1.15;
+  const yOf = v => m.top + ph * (1 - (S.log ? Math.log10(Math.max(v, yfloor) / yfloor) / Math.log10(ymax / yfloor) : v / ymax));
+  const eOf = j => meta.e_lo + j * dw;
+
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  const yticks = S.log
+    ? Array.from({ length: 40 }, (_, k) => 10 ** (Math.ceil(Math.log10(yfloor)) + k)).filter(v => v <= ymax)
+    : niceTicks(0, ymax, 5);
+  for (const v of yticks) {
+    const y = yOf(v);
+    ctx.fillStyle = RULE; ctx.fillRect(m.left, y, pw, 1);
+    ctx.fillStyle = MUTED; ctx.fillText(fmtRate(v), m.left - 8, y);
+  }
+  ctx.save();
+  ctx.translate(m.left - 62, m.top + ph / 2); ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = INK;
+  ctx.fillText(`Good pulses per second per ${fmtWidth(dw)} bin`, 0, 0);
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(m.left, m.top, pw, ph); ctx.clip();
+  const stepPath = arr => {
+    ctx.beginPath();
+    ctx.moveTo(xOf(eOf(j0)), yOf(0));
+    for (let k = 0; k < arr.length; k++) { const y = yOf(arr[k]); ctx.lineTo(xOf(eOf(j0 + k)), y); ctx.lineTo(xOf(eOf(j0 + k + 1)), y); }
+    ctx.lineTo(xOf(eOf(j1)), yOf(0));
+  };
+  const lastFit = S.fits?.fits?.at(-1);
+  if (lastFit) {  // the region the line fit uses
+    const xa = xOf(lastFit.roi_lo), xb = xOf(lastFit.roi_hi);
+    ctx.fillStyle = css("--lit-bg"); ctx.fillRect(xa, m.top, xb - xa, ph);
+    ctx.fillStyle = MUTED; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText("fit region", Math.max(xa + 3, m.left + 3), m.top + 3);
+  }
+  stepPath(sum); ctx.fillStyle = css("--sum-fill"); ctx.fill();
+  ctx.strokeStyle = INK; ctx.lineWidth = 1.25; ctx.stroke();
+  for (const o of overlays) { stepPath(o.data); ctx.strokeStyle = overlayColour(o.ch); ctx.lineWidth = 1.5; ctx.stroke(); }
+  ctx.restore();
+  energyAxis(g);
+
+  const which = states.length === S.stateNames.length ? "all experiment states" : `states ${states.join(", ") || "none"}`;
+  document.getElementById("specDesc").textContent =
+    `Good pulses from all ${S.channels.length} channels, summed, ${which}: ${fmt.int(sumTotal)} pulses in ${fmtDuration(expo)} of measurement `
+    + `(${fmtRate(sumTotal / expo)} per second). Rates are per second of the original measurement, so playback speed does not change them.`;
+  const finest = f === 1;
+  document.getElementById("zoomInfo").innerHTML =
+    `Showing <b>${fmt.energy(S.view[0], bigEnergy())} to ${fmt.energy(S.view[1], bigEnergy())}</b> in <b>${fmtWidth(dw)}</b> bins`
+    + (finest ? ` — the finest available: the bin size used for resolution fits in the original analysis${meta.bin_source ? ` (${escapeHtml(meta.bin_source)})` : ""}.`
+              : `. Zoom in for finer bins, down to ${fmtWidth(meta.bin_width)}.`);
+  renderOverlayChips(overlays);
+  return { sum, overlays, bins };
+}
+
+function renderOverlayChips(overlays) {
+  const box = document.getElementById("overlayChips");
+  box.replaceChildren();
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = overlays.length ? "Overlaid, each scaled to the sum's total:" : "Tap channels in the detector array to overlay them here.";
+  box.appendChild(label);
+  for (const o of overlays) {
+    const b = document.createElement("button");
+    b.className = "chip overlay";
+    b.style.setProperty("--swatch", overlayColour(o.ch));
+    b.setAttribute("aria-label", `Remove channel ${o.ch} from the overlay`);
+    b.innerHTML = `Ch ${o.ch} <span class="n">${fmt.int(o.n)} pulses, ×${o.factor.toFixed(1)}</span>`;
+    b.onclick = () => toggleOverlay(o.ch);
+    box.appendChild(b);
+  }
+}
+
+function toggleOverlay(ch) {
+  const k = S.overlay.indexOf(ch);
+  if (k >= 0) S.overlay.splice(k, 1);
+  else { if (S.overlay.length >= CHANNEL_COLOURS.length) S.overlay.shift(); S.overlay.push(ch); }
+  S.detail = ch;
+  render();
+}
+
+function drawWaterfall() {
+  const g = setup(document.getElementById("waterfall"));
+  const { ctx, pw, ph, m } = g, meta = S.meta, states = visibleStates();
+  const { len: slice, rows: rowsAll } = timeRows();
+  const nShow = Math.max(1, Math.min(rowsAll.length, Math.floor(ph / 4)));
+  const rows = rowsAll.slice(-nShow).reverse();  // newest at the top
+  const bins = displayBinning(pw), { f, j0, j1 } = bins, nb = Math.max(1, j1 - j0), rowH = ph / nShow;
+  const lines = rows.map(r => rebin(rowSum(r, states), f, j0, j1));
+  let vmax = 1;
+  for (const l of lines) for (const v of l) vmax = Math.max(vmax, v);
+  const floor = Number(css("--ramp-floor")) || 0;
+  if (rows.length) {
+    const img = new ImageData(nb, rows.length);
+    lines.forEach((l, r) => {
+      for (let k = 0; k < l.length; k++) {
+        if (!(l[k] > 0)) continue;
+        const [R, G, B] = rampAt(RAMP, floor + (1 - floor) * Math.log1p(l[k]) / Math.log1p(vmax));
+        const p = 4 * (r * nb + k);
+        img.data[p] = R; img.data[p + 1] = G; img.data[p + 2] = B; img.data[p + 3] = 255;
+      }
+    });
+    const off = document.createElement("canvas");
+    off.width = nb; off.height = rows.length;
+    off.getContext("2d").putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    // the first and last display bins may extend past the view; place the image by bin edges
+    const x0 = g.xOf(meta.e_lo + j0 * bins.dw), x1 = g.xOf(meta.e_lo + j1 * bins.dw);
+    ctx.save(); ctx.beginPath(); ctx.rect(m.left, m.top, pw, ph); ctx.clip();
+    ctx.drawImage(off, x0, m.top, x1 - x0, rowH * rows.length);
+    ctx.restore();
+  }
+  ctx.strokeStyle = RULE; ctx.strokeRect(m.left + 0.5, m.top + 0.5, pw - 1, ph - 1);
+
+  // ---- experiment-state column, with names written in, and state changes marked across the plot
+  const sx = m.left - m.state - 6;
+  const yOfTime = t => {  // continuous time -> y, using the row that holds t
+    for (let k = 0; k < rows.length; k++) {
+      const r = rows[k];
+      if (t >= r.t && t <= r.t + slice) return m.top + rowH * (k + 1 - (t - r.t) / slice);
+    }
+    return null;
+  };
+  const segs = [];
+  rows.forEach((r, k) => {
+    const top = m.top + rowH * k, edges = [r.t, ...S.timeline.map(([t]) => t).filter(t => t > r.t && t < r.t + slice), r.t + slice];
+    for (let j = edges.length - 2; j >= 0; j--) {  // newest part of the row is at the top
+      const st = stateAt(edges[j]);
+      const yTop = top + rowH * (1 - (edges[j + 1] - r.t) / slice), yBot = top + rowH * (1 - (edges[j] - r.t) / slice);
+      const lastSeg = segs[segs.length - 1];
+      if (lastSeg && lastSeg.st === st && Math.abs(lastSeg.y1 - yTop) < 0.5) lastSeg.y1 = yBot;
+      else segs.push({ st, y0: yTop, y1: yBot });
+    }
+  });
+  for (const sg of segs) {
+    const hidden = S.hiddenStates.has(sg.st), col = stateColour(sg.st);
+    ctx.globalAlpha = hidden ? 0.3 : 1;
+    ctx.fillStyle = col; ctx.fillRect(sx, sg.y0, m.state, sg.y1 - sg.y0 + 0.5);
+    ctx.globalAlpha = 1;
+    if (sg.y1 - sg.y0 >= m.font + 4) {
+      const c = col.match(/\w\w/g).map(h => parseInt(h, 16));
+      ctx.fillStyle = hidden ? MUTED : inkOn(c); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.font = `600 ${m.font}px system-ui, sans-serif`;
+      const name = sg.st === NO_STATE ? "before start" : sg.st;
+      ctx.fillText(name, sx + m.state / 2, (sg.y0 + sg.y1) / 2, m.state - 6);
+      ctx.font = `${m.font}px system-ui, sans-serif`;
+    }
+  }
+  // state changes: a dashed line across the heatmap, labelled with the new state
+  ctx.setLineDash([4, 3]);
+  for (const [t, label] of S.timeline) {
+    const y = yOfTime(t);
+    if (y == null || y <= m.top + 1) continue;
+    ctx.strokeStyle = INK; ctx.globalAlpha = 0.7;
+    ctx.beginPath(); ctx.moveTo(sx, y); ctx.lineTo(m.left + pw, y); ctx.stroke();
+    ctx.globalAlpha = 1;
+    const text = `${label === NO_STATE ? "before start" : label} begins ${fmt.clock(t)}`;
+    const tw = ctx.measureText(text).width;
+    ctx.fillStyle = PANEL; ctx.fillRect(m.left + pw - tw - 10, y - m.font - 4, tw + 8, m.font + 4);
+    ctx.fillStyle = INK; ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+    ctx.fillText(text, m.left + pw - 6, y - 2);
+  }
+  ctx.setLineDash([]);
+  for (let k = 0; k < rows.length; k++) if (rows[k].live) {
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.5;
+    ctx.strokeRect(m.left + 0.75, m.top + rowH * k + 0.75, pw - 1.5, rowH - 1.5);
+    ctx.lineWidth = 1;
+  }
+
+  // ---- column headers and time labels
+  ctx.fillStyle = INK; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+  ctx.font = `600 ${m.font}px system-ui, sans-serif`;
+  ctx.fillText("State", sx + m.state / 2, m.top - 6);
+  ctx.textAlign = "right";
+  ctx.fillText(m.narrow ? "Start" : "Slice start", sx - 6, m.top - 6);
+  ctx.textAlign = "left";
+  ctx.fillText(`Counts in each ${fmtDuration(slice)} slice →`, m.left, m.top - 6);
+  ctx.font = `${m.font}px system-ui, sans-serif`;
+  ctx.fillStyle = MUTED; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  const every = Math.max(1, Math.ceil((m.font + 8) / rowH));
+  rows.forEach((r, k) => {
+    if (k % every) return;
+    ctx.fillText(r.live ? (m.narrow ? "now" : "now (filling)") : fmt.clock(r.t), sx - 6, m.top + rowH * (k + 0.5), m.tickw);
+  });
+  energyAxis(g);
+
+  const which = states.length === S.stateNames.length ? "all states" : `only ${states.join(", ") || "no states"}`;
+  document.getElementById("fallDesc").textContent =
+    `Each row is one ${fmtDuration(slice)} slice of good pulses from all channels (${which}) in ${fmtWidth(bins.dw)} bins, newest at the top; the outlined top row is still filling. `
+    + `The State column shows which experiment state the instrument was in; dashed lines mark each change.`;
+  return { rows, rowH, lines, bins, len: slice };
+}
+
+function renderStateChips() {
+  const box = document.getElementById("stateChips");
+  box.querySelectorAll("button").forEach(b => b.remove());
+  for (const st of S.stateNames) {
+    const n = total(sumAll(null, [st]));
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.style.setProperty("--swatch", stateColour(st));
+    b.setAttribute("aria-pressed", !S.hiddenStates.has(st));
+    b.innerHTML = `${escapeHtml(st === NO_STATE ? "before start" : st)} <span class="n">${fmt.int(n)}</span>`;
+    b.title = "Include or exclude this state's pulses in both plots and the detector map";
+    b.onclick = () => { S.hiddenStates.has(st) ? S.hiddenStates.delete(st) : S.hiddenStates.add(st); S.gain = gainCheck(); render(); };
+    box.appendChild(b);
+  }
+  if (S.hiddenStates.size) {
+    const all = document.createElement("button");
+    all.textContent = "Include all states";
+    all.onclick = () => { S.hiddenStates.clear(); S.gain = gainCheck(); render(); };
+    box.appendChild(all);
+  }
+}
+
+function renderArray() {
+  const L = layout(), grid = document.getElementById("grid"), states = visibleStates();
+  const xs = Object.values(L).map(p => p.x), ys = Object.values(L).map(p => p.y);
+  const nx = Math.max(...xs) + 1, ny = Math.max(...ys) + 1;
+  grid.style.gridTemplateColumns = `repeat(${nx}, minmax(0, 1fr))`;
+  const counts = Object.fromEntries(S.channels.map(ch => [ch, total(sumAll([ch], states))]));
+  const expo = exposureS(states) || 1, rate = ch => counts[ch] / expo;
+  const cmax = Math.max(1, ...Object.values(counts));
+  const cfrac = n => n / cmax;  // from zero: channels with nearly equal rates look nearly equal
+  const floor = Number(css("--ramp-floor")) || 0;
+  grid.replaceChildren();
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const ch = Object.keys(L).find(c => L[c].x === x && L[c].y === y);
+    const b = document.createElement("button");
+    b.className = "pixel";
+    if (!ch) { b.disabled = true; b.style.visibility = "hidden"; grid.appendChild(b); continue; }
+    const p = L[ch], g = S.gain[ch];
+    let colour, value;
+    if (S.metric === "counts") {
+      colour = rampAt(RAMP, floor + (1 - floor) * cfrac(counts[ch]));
+      value = `${fmtRate(rate(ch))}/s`;
+    } else if (g == null) {
+      colour = [184, 192, 196]; value = "too few";
+    } else {
+      colour = rampAt(DIVERGING, 0.5 + g / 0.06);  // ±3% spans the scale
+      value = fmt.pct(100 * g);
+    }
+    b.style.setProperty("--cell", rgb(colour));
+    b.style.setProperty("--cell-ink", inkOn(colour));
+    b.style.setProperty("--sel", S.overlay.includes(ch) ? overlayColour(ch) : "transparent");
+    b.dataset.real = p.copy_of == null;
+    b.setAttribute("aria-pressed", S.overlay.includes(ch));
+    b.setAttribute("aria-label", `Channel ${ch}, ${p.copy_of == null ? "real" : `copy of ${p.copy_of}`}. ${value}.`);
+    b.innerHTML = `<span class="ch">${ch}</span><span class="v">${value}</span>`;
+    b.onclick = () => toggleOverlay(ch);
+    grid.appendChild(b);
+  }
+  const key = document.getElementById("gridKey"), note = document.getElementById("metricNote");
+  if (S.metric === "counts") {
+    key.innerHTML = `<span>0</span><i style="background:linear-gradient(90deg,${[0, .25, .5, .75, 1].map(f => rgb(rampAt(RAMP, floor + (1 - floor) * f))).join(",")})"></i><span>${fmtRate(cmax / expo)} good pulses/s</span>`;
+    note.textContent = "Good pulses per second of measurement for each channel, in the states included below the spectrum. "
+      + "Copies differ slightly from the channel they copy: at a different gain, a few pulses fall on the other side of the recipe's cuts or the energy range.";
+  } else {
+    key.innerHTML = `<span>−3%</span><i style="background:linear-gradient(90deg,${DIVERGING.map(rgb).join(",")})"></i><span>+3%</span>`;
+    note.textContent = "Energy-scale check: how much each channel's spectrum is stretched relative to the whole array, found by matching "
+      + "line positions. 0% means the channel's calibration agrees with the array. The copies simulated with a wrong gain stand out; "
+      + "their energy error is larger than their gain error because the calibration curve bends.";
+  }
+  renderDetail(counts);
+}
+
+function renderDetail(counts) {
+  const box = document.getElementById("pixelDetail"), ch = S.detail, L = layout();
+  if (!ch || !L[ch]) { box.innerHTML = `<span class="muted">Tap a channel to see its details here.</span>`; return; }
+  const p = L[ch], g = S.gain[ch];
+  const kind = p.copy_of == null ? "Real detector channel" : `Simulated copy of channel ${p.copy_of}`;
+  box.innerHTML = `<dl>
+    <dt>Channel</dt><dd><b>${ch}</b> at column ${p.x + 1}, row ${p.y + 1}</dd>
+    <dt>What it is</dt><dd>${kind}${p.copy_of == null ? "" : `, analysed with channel ${p.copy_of}'s recipe`}</dd>
+    <dt>Good pulses</dt><dd>${fmt.int(counts[ch])} (${fmtRate(counts[ch] / (exposureS(visibleStates()) || 1))} per second)</dd>
+    <dt>Energy scale</dt><dd>${g == null ? "needs at least 300 good pulses" : `${fmt.pct(100 * g)} relative to the array`}</dd>
+    ${p.copy_of == null ? "" : `<dt>Simulated gain</dt><dd>${fmt.pct(100 * (p.gain - 1))} in pulse height</dd>`}
+  </dl>`;
+}
+
+// ======================================================================================
+// Line fit: refitted in its own process (mass2-live-fit), shown here as mass2's plotm image plus a trend
+let shownPng = null;
+function renderFit() {
+  const panel = document.getElementById("fitPanel"), F = S.fits;
+  panel.hidden = !F;
+  if (!F) return;
+  const fits = F.fits || [], last = fits.at(-1), roi = F.roi || {};
+  const big = bigEnergy(), e = v => fmt.energy(v, big);
+  document.getElementById("fitTitle").textContent = `Line fit: ${roi.label ?? "region of interest"}, all channels summed`;
+  document.getElementById("fitDesc").textContent =
+    `The same fit as the original analysis (${roi.source || "linefit"}), but on all channels summed, all states. `
+    + `It is redone at most every ${F.every_s ?? 10} s by mass2-live-fit, a separate process, so the analysis never waits for it.`;
+  const params = document.getElementById("fitParams");
+  if (!last) { params.innerHTML = `<dt>Status</dt><dd>Waiting for enough counts in the fit region.</dd>`; return; }
+  const pm = ([v, err], f) => err == null ? f(v) : `${f(v)} ± ${f(err)}`;
+  params.innerHTML = `
+    <dt>Resolution (FWHM)</dt><dd class="big">${pm(last.fwhm, v => `${v.toFixed(big ? 1 : 2)} eV`)}</dd>
+    <dt>Peak position</dt><dd>${pm(last.peak, v => `${v.toFixed(big ? 1 : 2)} eV`)}</dd>
+    <dt>Counts in fit region</dt><dd>${fmt.int(last.counts_in_roi)} (${e(last.roi_lo)} to ${e(last.roi_hi)})</dd>
+    <dt>Reduced χ²</dt><dd>${last.redchi.toFixed(2)}</dd>
+    <dt>This fit</dt><dd>number ${fmt.int(fits.length)}, at ${fmt.clock(last.t)}, from ${fmt.int(last.slices)} slices; fit ${fmt.ms(last.fit_ms)}, plot ${fmt.ms(last.plot_ms)}</dd>`;
+  const src = last.png || `fits/latest.png?n=${fits.length}`;
+  if (src !== shownPng) { document.getElementById("fitImg").src = src; shownPng = src; }
+  drawFitTrend(fits);
+}
+
+function drawFitTrend(fits) {
+  const canvas = document.getElementById("fitTrend"), dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = "11px system-ui, sans-serif";
+  const m = { left: 54, right: 8, top: 8, bottom: 34 }, pw = w - m.left - m.right, ph = h - m.top - m.bottom;
+  const pts = fits.filter(f => f.fwhm[0] > 0);
+  if (!pts.length) return;
+  const lo = Math.min(...pts.map(f => f.fwhm[0] - (f.fwhm[1] ?? 0))), hi = Math.max(...pts.map(f => f.fwhm[0] + (f.fwhm[1] ?? 0)));
+  const pad = 0.1 * (hi - lo || 1), y0 = Math.max(0, lo - pad), y1 = hi + pad;
+  const t0 = pts[0].t, t1 = Math.max(pts.at(-1).t, t0 + 1);
+  const xOf = t => m.left + pw * (t - t0) / (t1 - t0), yOf = v => m.top + ph * (1 - (v - y0) / (y1 - y0));
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const v of niceTicks(y0, y1, 4)) { ctx.fillStyle = RULE; ctx.fillRect(m.left, yOf(v), pw, 1); ctx.fillStyle = MUTED; ctx.fillText(v.toFixed(v < 10 ? 2 : 1), m.left - 6, yOf(v)); }
+  ctx.fillStyle = MUTED; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  ctx.fillText(fmt.clock(t0), m.left + 24, h - m.bottom + 4);
+  if (pts.length > 1) ctx.fillText(fmt.clock(t1), m.left + pw - 24, h - m.bottom + 4);
+  ctx.fillStyle = INK;
+  ctx.fillText("Time of fit", m.left + pw / 2, h - m.bottom + 18);
+  ctx.save(); ctx.translate(12, m.top + ph / 2); ctx.rotate(-Math.PI / 2); ctx.textBaseline = "middle";
+  ctx.fillText("FWHM (eV)", 0, 0); ctx.restore();
+  ctx.strokeStyle = INK; ctx.fillStyle = INK; ctx.lineWidth = 1.25;
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath(); pts.forEach((f, k) => { const x = xOf(f.t), y = yOf(f.fwhm[0]); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke();
+  ctx.globalAlpha = 1;
+  for (const f of pts) {
+    const x = xOf(f.t), err = f.fwhm[1] ?? 0;
+    ctx.beginPath(); ctx.moveTo(x, yOf(f.fwhm[0] - err)); ctx.lineTo(x, yOf(f.fwhm[0] + err)); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, yOf(f.fwhm[0]), 3, 0, 2 * Math.PI); ctx.fill();
+  }
+}
+
+document.getElementById("fitZoom").onclick = () => {
+  const last = S.fits?.fits?.at(-1);
+  if (last) setView(last.roi_lo, last.roi_hi);
+};
+
+// ======================================================================================
+// Pipeline view: the same numbers as the counters, arranged as files and steps
+const STEP_DETAIL = {  // what the last poll moved through each step
+  read: lp => `${fmt.int(lp.new_chunks)} chunks`,
+  label: lp => `${fmt.int(lp.new_chunks * 100)} records`,
+  recipe: lp => `${fmt.int(lp.new_chunks * 100)} records`,
+  write: lp => `${fmt.int(lp.new_chunks)} batches`,
+  histogram: () => "",
+  publish: () => "3 files",
+};
+
+function setFile(id, statsHtml) { document.querySelector(`#${id} .stats`).innerHTML = statsHtml; }
+
+function renderPipeline() {
+  const st = S.status, meta = S.meta;
+  if (!st || !meta) return;
+  const L = layout(), real = Object.values(L).filter(p => p.copy_of == null).length, n = S.channels.length;
+  const files = meta.files || {};
+  document.querySelector("#f-ljh .name").textContent = (meta.ljh_files || []).join(", ") || "*.ljh";
+  setFile("f-ljh", `<span><b>${real}</b> real channels</span>`);
+  document.querySelector("#f-recipe .name").textContent = files.recipe || "recipe.pkl";
+  setFile("f-recipe", `<span><b>${(meta.recipe_channels || []).length}</b> channel recipes</span><span><b>${(meta.recipe_steps || []).length}</b> steps each</span>`);
+  document.querySelector("#p-sim .what").textContent =
+    `Replays the LJH pulses with their original timestamps, at ${currentSpeed()}× real time, as a live DAQ would, 100 records per chunk, `
+    + `adding ${n - real} gain-adjusted copies to make a ${n}-channel array, and replays the experiment-state log alongside.`;
+  setFile("f-input", `<span><b>${fmt.int(st.chunks)}</b> chunks</span><span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.bytes(st.input_bytes)}</b></span>`);
+  setFile("f-statesfile", `<span><b>${fmt.int(S.timeline.length)}</b> state changes</span>`);
+  document.getElementById("applyWhat").textContent =
+    REPLAY ? `This recording was made in steps of ${fmtDuration(meta.fine_s)} of data; each playback step lights the loop once. Copies use their real channel's recipe.`
+           : `Polls the stream every ${meta.poll_s ?? 0.5} s. ${fmt.int(st.polls)} polls so far. Copies use their real channel's recipe.`;
+  document.getElementById("recipeSteps").textContent =
+    `Run the saved steps on each channel's new pulses: ${(meta.recipe_steps || []).map(s => s.replace(/Step$/, "")).join(" → ")}, `
+    + `giving ${meta.energy_col} and a good/bad flag.`;
+  const lp = st.last_poll || { new_chunks: 0, new_records: 0, new_good: 0, step_ms: null };
+  for (const li of document.querySelectorAll("#steps li")) {
+    const k = li.dataset.step, ms = lp.step_ms ? lp.step_ms[k] : null;
+    li.querySelector(".m").textContent = `${STEP_DETAIL[k](lp)}${ms != null ? ` · ${fmt.ms(ms)}` : ""}`;
+  }
+  document.getElementById("loopNote").textContent = lp.step_ms
+    ? `↻ last poll took ${fmt.ms(Object.values(lp.step_ms).reduce((a, b) => a + b, 0))}, then waits and polls again`
+    : `↻ then waits until ${S.meta.poll_s ?? 0.5} s after the poll began, and polls again`;
+  setFile("f-output", `<span><b>${fmt.int(st.chunks)}</b> batches</span><span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.bytes(st.output_bytes)}</b></span>`);
+  setFile("f-hist", `<span><b>${fmt.int(S.slices.length)}</b> finished slices of ${fmtDuration(meta.slice_s)}</span>${st.histogram_bytes != null ? `<span><b>${fmt.bytes(st.histogram_bytes)}</b></span>` : ""}`);
+  const open = S.current.reduce((n, r) => n + Object.values(r.stateSum).reduce((a, v) => a + total(v), 0), 0);
+  setFile("f-current", `<span><b>${fmt.int(open)}</b> good pulses so far</span>`);
+  setFile("f-states", `<span><b>${fmt.int(S.timeline.length)}</b> state changes</span>`);
+  setFile("f-status", `<span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.int(st.good_pulses)}</b> good pulses</span>`);
+  const fits = S.fits?.fits || [], lastFit = fits.at(-1);
+  document.getElementById("fitWhat").textContent =
+    `Keeps a running sum of the finished slices over all channels and refits ${S.fits?.roi?.label ?? "the line"} `
+    + `at most every ${S.fits?.every_s ?? 10} s, then draws it with plotm.`;
+  setFile("f-fits", `<span><b>${fmt.int(fits.length)}</b> fits</span>`
+    + (lastFit ? `<span>FWHM <b>${lastFit.fwhm[0].toFixed(2)} eV</b></span><span>last fit ${fmt.ms(lastFit.fit_ms)}</span>` : ""));
+  document.getElementById("viewWhat").textContent = REPLAY
+    ? "Plays the recording back one recorded poll at a time, as if reading the files above."
+    : `Asks the viewer server for anything new every ${POLL_MS / 1000} s.`;
+}
+
+// Light the loop's steps in order, and the files each step writes.
+const STEP_FILES = { read: ["f-input"], label: ["f-statesfile"], write: ["f-output"], histogram: ["f-hist", "f-current"], publish: ["f-states", "f-status"] };
+function animateLoop(lp) {
+  const dot = document.getElementById("loopDot");
+  dot.classList.remove("on"); void dot.offsetWidth; dot.classList.add("on");
+  if (!lp) return;
+  const steps = lp.new_chunks > 0 ? ["read", "label", "recipe", "write", "histogram", "publish"] : ["read", "publish"];
+  const lis = Object.fromEntries([...document.querySelectorAll("#steps li")].map(li => [li.dataset.step, li]));
+  const gap = REDUCED_MOTION ? 0 : Math.min(140, (POLL_MS - 300) / steps.length);
+  document.getElementById("p-apply").classList.add("running");
+  steps.forEach((k, i) => setTimeout(() => {
+    lis[k].classList.add("lit");
+    for (const f of STEP_FILES[k] || []) document.getElementById(f).classList.add("written");
+    setTimeout(() => {
+      lis[k].classList.remove("lit");
+      for (const f of STEP_FILES[k] || []) document.getElementById(f).classList.remove("written");
+    }, gap * 1.5 + 60);
+  }, gap * i));
+  setTimeout(() => document.getElementById("p-apply").classList.remove("running"), gap * steps.length + 200);
+}
+
+// ======================================================================================
+// Rendering and interaction
+let geometry = null;
+function render() {
+  if (!S.meta) return;
+  renderExplain();
+  renderCounters();
+  if (S.tab === "spectra") {
+    geometry = { spec: drawSpectrum(), fall: drawWaterfall() };
+    renderFit();
+    renderStateChips();
+    renderArray();
+  } else {
+    renderPipeline();
+  }
+}
+
+for (const [id, tab] of [["tab-spectra", "spectra"], ["tab-pipeline", "pipeline"]]) {
+  document.getElementById(id).onclick = () => {
+    S.tab = tab;
+    document.getElementById("tab-spectra").setAttribute("aria-selected", tab === "spectra");
+    document.getElementById("tab-pipeline").setAttribute("aria-selected", tab === "pipeline");
+    document.getElementById("view-spectra").hidden = tab !== "spectra";
+    document.getElementById("view-pipeline").hidden = tab !== "pipeline";
+    render();
+  };
+}
+const setLog = log => {
+  S.log = log;
+  document.getElementById("logBtn").setAttribute("aria-pressed", log);
+  document.getElementById("linBtn").setAttribute("aria-pressed", !log);
+  render();
+};
+document.getElementById("logBtn").onclick = () => setLog(true);
+document.getElementById("linBtn").onclick = () => setLog(false);
+for (const [id, metric] of [["mCounts", "counts"], ["mGain", "gain"]]) {
+  document.getElementById(id).onclick = () => {
+    S.metric = metric;
+    document.getElementById("mCounts").setAttribute("aria-pressed", metric === "counts");
+    document.getElementById("mGain").setAttribute("aria-pressed", metric === "gain");
+    render();
+  };
+}
+
+function eAt(canvas, clientX) {
+  const m = margins(canvas.id), rect = canvas.getBoundingClientRect(), pw = rect.width - m.left - m.right;
+  return S.view[0] + (clientX - rect.left - m.left) / pw * (S.view[1] - S.view[0]);
+}
+
+function readout(canvas, e) {
+  if (!S.meta || !geometry) return;
+  const E = eAt(canvas, e.clientX), meta = S.meta, m = margins(canvas.id);
+  const geo = canvas.id === "spectrum" ? geometry.spec : geometry.fall, { dw, j0 } = geo.bins;
+  const j = Math.floor((E - meta.e_lo) / dw), k = j - j0;
+  if (k < 0 || k >= (canvas.id === "spectrum" ? geo.sum.length : geo.lines[0]?.length ?? 0)) return;
+  const big = bigEnergy(), binTxt = `${fmt.energy(meta.e_lo + j * dw, big)} to ${fmt.energy(meta.e_lo + (j + 1) * dw, big)}`;
+  if (canvas.id === "spectrum") {
+    let text = `Bin ${binTxt}: ${fmtRate(geo.sum[k])} good pulses per second (all channels)`;
+    for (const o of geo.overlays) text += `; ch ${o.ch} scaled: ${fmtRate(o.data[k])}/s`;
+    document.getElementById("specReadout").textContent = text;
+  } else {
+    const rect = canvas.getBoundingClientRect();
+    const r = Math.floor((e.clientY - rect.top - m.top) / geo.rowH), row = geo.rows[r];
+    if (!row) return;
+    const when = row.live ? "the slice still filling" : `the slice starting ${fmt.clock(row.t)}`;
+    document.getElementById("fallReadout").textContent =
+      `Bin ${binTxt}, ${when} (state ${stateAt(row.t + geo.len / 2)}): ${fmt.int(geo.lines[r][k])} good pulses`;
+  }
+}
+
+// ---- zooming the energy axis (both plots share it). The narrowest view is 30 of the finest bins.
+function setView(lo, hi) {
+  const m = S.meta, minSpan = 30 * m.bin_width, full = m.e_hi - m.e_lo;
+  let span = Math.min(full, Math.max(minSpan, hi - lo)), mid = (lo + hi) / 2;
+  lo = Math.min(Math.max(m.e_lo, mid - span / 2), m.e_hi - span);
+  S.view = [lo, lo + span];
+  document.getElementById("specReadout").textContent = "";
+  document.getElementById("fallReadout").textContent = "";
+  scheduleRender();
+}
+const zoomAt = (E, factor) => setView(E - (E - S.view[0]) * factor, E + (S.view[1] - E) * factor);
+const centre = () => (S.view[0] + S.view[1]) / 2;
+let pending = false;
+function scheduleRender() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; render(); }); } }
+
+document.getElementById("zoomIn").onclick = () => S.meta && zoomAt(centre(), 0.5);
+document.getElementById("zoomOut").onclick = () => S.meta && zoomAt(centre(), 2);
+document.getElementById("panLeft").onclick = () => { if (S.meta) { const d = 0.25 * (S.view[1] - S.view[0]); setView(S.view[0] - d, S.view[1] - d); } };
+document.getElementById("panRight").onclick = () => { if (S.meta) { const d = 0.25 * (S.view[1] - S.view[0]); setView(S.view[0] + d, S.view[1] + d); } };
+document.getElementById("resetBtn").onclick = () => S.meta && setView(S.meta.e_lo, S.meta.e_hi);
+
+let drag = null;
+const touches = new Map();  // pointerId -> clientX, for pinch
+for (const id of ["spectrum", "waterfall"]) {
+  const c = document.getElementById(id);
+  c.addEventListener("pointerdown", e => {
+    if (!S.meta) return;
+    touches.set(e.pointerId, e.clientX);
+    if (touches.size === 2) {  // a pinch starts: remember the span between the fingers
+      drag = null;
+      const [a, b] = [...touches.values()];
+      c.pinch = { d0: Math.abs(a - b) || 1, view0: [...S.view], E: eAt(c, (a + b) / 2) };
+    } else {
+      drag = { canvas: c, e0: eAt(c, e.clientX), x0: e.clientX, y0: e.clientY };
+    }
+    readout(c, e);
+  });
+  c.addEventListener("pointermove", e => {
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, e.clientX);
+    if (c.pinch && touches.size === 2) {
+      const [a, b] = [...touches.values()], scale = c.pinch.d0 / (Math.abs(a - b) || 1);
+      const [v0, v1] = c.pinch.view0, E = c.pinch.E;
+      setView(E - (E - v0) * scale, E + (v1 - E) * scale);
+      return;
+    }
+    readout(c, e);
+  });
+  const end = e => { touches.delete(e.pointerId); if (touches.size < 2) c.pinch = null; };
+  c.addEventListener("pointerup", end);
+  c.addEventListener("pointercancel", end);
+  c.addEventListener("dblclick", () => document.getElementById("resetBtn").click());
+  c.addEventListener("wheel", e => {  // trackpad pinch arrives as ctrl + wheel; plain scrolling still scrolls the page
+    if (!S.meta || !e.ctrlKey) return;
+    e.preventDefault();
+    zoomAt(eAt(c, e.clientX), Math.exp(e.deltaY * 0.01));
+  }, { passive: false });
+}
+window.addEventListener("pointerup", e => {
+  if (!drag) return;
+  const { canvas, e0, x0, y0 } = drag;
+  drag = null;
+  if (Math.abs(e.clientX - x0) < 12 || Math.abs(e.clientY - y0) > Math.abs(e.clientX - x0)) return;  // a tap or a scroll
+  const e1 = eAt(canvas, e.clientX);
+  setView(Math.min(e0, e1), Math.max(e0, e1));
+});
+window.addEventListener("pointercancel", () => { drag = null; });
+window.addEventListener("resize", render);
+poll();
+</script>
+</body>
+</html>
