@@ -23,6 +23,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray
 
+from .parent import exit_with_parent
 from .arrow_stream import ArrowStreamTailer, write_text_atomically
 from .histogram import HistogramSpec, df_to_slices
 
@@ -206,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--every", type=float, default=10, help="refit at most this often, seconds (default 10)")
     p.add_argument("--source", default="", help="where this fit comes from, shown in the viewer")
     args = p.parse_args(argv)
+    exit_with_parent()
     try:
         run_fits(args.hist_dir, RoiFit(args.line, args.dlo, args.dhi, args.source), args.every)
     except KeyboardInterrupt:

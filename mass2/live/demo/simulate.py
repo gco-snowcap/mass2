@@ -34,6 +34,7 @@ from numpy.typing import NDArray
 
 import mass2
 from mass2.core import ljhutil
+from ..parent import exit_with_parent
 from ..arrow_stream import ArrowStreamWriter
 from ..states import StateFileWriter, parse_state_text
 
@@ -307,6 +308,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--scale-baseline", action="store_true", help="--scale multiplies raw samples, baseline included")
     p.add_argument("--no-states", action="store_true", help="do not replay the experiment-state file")
     args = p.parse_args(argv)
+    exit_with_parent()
 
     folder = args.ljh_folder or default_pulse_folder()
     sources = load_ljh_sources(folder, args.max_pulses)

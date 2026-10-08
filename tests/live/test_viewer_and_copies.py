@@ -6,6 +6,8 @@
 11. The line fit follows the states selected in the viewer, and the server checks what it is sent.
 12. The demo refuses playback speeds outside the viewer's range.
 13. The page is told the resident memory of each process involved.
+14. Each visitor gets a run of their own, up to a limit, and a run nobody views is ended.
+15. A run whose tool fails starts over, and a tool exits when its demo is gone.
 """
 
 import json
@@ -180,3 +182,76 @@ def test_13_the_page_is_told_each_process_memory():
         assert mem["child"]["rss_bytes"] > 80e6 and mem["viewer"]["rss_bytes"] > 10e6
     finally:
         child.kill()
+
+
+class _FakeController:
+    """Stands in for DemoController: records what it is asked to do, starts no processes."""
+
+    def __init__(self, run_dir, store):
+        self.run_dir, self.store, self.speed, self.active, self.stopped, self.maintained = run_dir, store, 5.0, None, False, 0
+
+    def switch(self, key):
+        self.active = key
+
+    def describe(self):
+        return {"active": self.active}
+
+    def pids(self):
+        return {}
+
+    def maintain(self, max_gb):
+        self.maintained += 1
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_14_each_visitor_gets_a_run_of_their_own(tmp_path):
+    from mass2.live.demo.visitors import VisitorRuns
+
+    runs = VisitorRuns(tmp_path, max_runs=2, dataset="bessy_20240727", idle_s=60, new_controller=_FakeController)
+    a, b = runs.route("/").redirect, runs.route("/").redirect
+    assert a != b and a.startswith("/r/") and a.endswith("/")
+    assert runs.route("/").busy  # a third visitor waits
+    site_a, site_b = runs.route(a + "api/state").site, runs.route(b).site
+    assert site_a is not site_b and site_a.controller.active == "bessy_20240727"
+    assert runs.route(a + "api/state").path == "/api/state" and runs.route(a + "arrow.js").path == "/arrow.js"
+    assert runs.route(a.rstrip("/")).redirect == a and runs.route("/r/nothex/").site is None
+
+    runs.runs[b.split("/")[2]].last_seen -= 120  # b's page has been closed for two minutes
+    runs.tick(max_gb=4)
+    assert site_b.controller.stopped and not site_a.controller.stopped and site_a.controller.maintained == 1
+    assert runs.route("/").redirect  # a slot is free again
+    revived = runs.route(b + "api/state").site  # b's old address now starts a new run (or waits when all are in use)
+    assert revived is None or revived is not site_b
+    runs.stop_all()
+    assert site_a.controller.stopped and runs.runs == {}
+
+
+def test_15_a_failed_tool_starts_the_run_over_and_tools_exit_with_their_demo(tmp_path, monkeypatch):
+    controller = launcher.DemoController(tmp_path, server.HistogramStore(tmp_path / "hist"))
+    starts = []
+    monkeypatch.setattr(controller, "switch", lambda key: starts.append(key))
+    controller.active = "20230626"
+    monkeypatch.setattr(controller, "failed", lambda: ["mass2-live-apply"])
+    for _ in range(5):
+        controller.maintain(max_gb=4)
+    assert starts == ["20230626"] * 3  # three quick restarts, then at most one a minute
+
+    script = "import os, sys, time; from mass2.live.parent import exit_with_parent; exit_with_parent(0.05); time.sleep(30)"
+    parent = subprocess.Popen(  # a stand-in demo that starts one tool and is then killed
+        [sys.executable, "-c", f"import os, subprocess, sys, time; p = subprocess.Popen([sys.executable, '-c', {script!r}], env=os.environ | {{'MASS2_LIVE_PARENT_PID': str(os.getpid())}}); print(p.pid, flush=True); time.sleep(30)"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    child = int(parent.stdout.readline())
+    parent.kill()
+    parent.wait()
+    for _ in range(100):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child, 9)
+        raise AssertionError("the tool outlived its demo")

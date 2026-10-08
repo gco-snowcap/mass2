@@ -468,6 +468,7 @@ function currentSpeed() { return REPLAY ? REPLAY.speed : (S.controller?.speed ??
 
 // ======================================================================================
 // Data in
+let failingSince = null;  // when requests to the server started failing
 async function poll() {
   let s, since;
   try {
@@ -475,10 +476,15 @@ async function poll() {
     since = S.baseRowS != null && S.baseRowS !== rowS ? 0 : S.nDone;  // a new row length: ask for a new base
     s = REPLAY ? REPLAY.state(since) : await fetchState(since, rowS);
   } catch (e) {
-    setStatus("Cannot reach the viewer server. Check that mass2-live-demo or mass2-live-view is still running.", true);
+    failingSince ??= Date.now();
+    const secs = (Date.now() - failingSince) / 1000;
+    if (e.message === "busy") setStatus("Every run this computer can host is in use; retrying…", false);
+    else if (secs < 30) setStatus("Connection interrupted; retrying…", false);  // e.g. the tunnel reconnecting: usually seconds
+    else setStatus(`Cannot reach the viewer server for ${Math.round(secs)} s. Check that mass2-live-demo or mass2-live-view is still running.`, true);
     setTimeout(poll, POLL_MS);
     return;
   }
+  failingSince = null;
   try {
     if (s.run !== S.run) {
       resetData(s.run);
@@ -502,6 +508,7 @@ const ARROW = REPLAY ? null : new Promise((ok, fail) => {
 async function fetchState(since, rowS) {
   await ARROW;
   const res = await fetch(`api/state?since=${since}&row_s=${rowS}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(res.status === 503 ? "busy" : `HTTP ${res.status}`);
   const table = Arrow.tableFromIPC(new Uint8Array(await res.arrayBuffer()));
   const s = JSON.parse(table.schema.metadata.get("mass2.live"));
   const col = name => table.getChild(name);
@@ -575,6 +582,8 @@ function ingest(s) {
     S.timeline = s.states;
     S.fits = s.fits || null;
     S.processes = s.processes ?? null;
+    S.fileBytes = s.file_bytes ?? null;
+    S.visitor = s.visitor ?? null;
     S.channels = s.channels;
     noteStates(s);
     if (!REPLAY) followSelection(s.selected_states);
@@ -863,10 +872,12 @@ function renderExplain() {
   if (!S.meta) return;
   const n = S.channels.length, real = Object.values(layout()).filter(p => p.copy_of == null).length;
   const source = REPLAY
-    ? `<strong>Playing back a recorded run</strong> of the mass2 live pipeline, with the original times, at ${document.getElementById("speedValue").textContent} (set it with Playback speed; it loops).`
+    ? `<strong>Playing back a recorded run</strong> of the mass2 live pipeline, with the original times, at ${document.getElementById("speedValue").textContent} (set it with Playback speed; it replays without end, continuing the timeline).`
     : "<strong>Live:</strong> mass2-live-apply is analysing pulses as they are written; this page refreshes every 2 s.";
   el.innerHTML = `${source} Raw detector pulses from ${fmt.int(n)} channels (${real} real, ${n - real} simulated copies) are turned `
-    + `into energies by a saved mass2 recipe, then histogrammed. The spectra show only <em>good</em> pulses: ones that pass the recipe's quality cuts.`;
+    + `into energies by a saved mass2 recipe, then histogrammed. The spectra show only <em>good</em> pulses: ones that pass the recipe's quality cuts.`
+    + (S.visitor ? ` <strong>This run is yours:</strong> the dataset, speed and states you choose change only it. Send someone this page's address to show them `
+      + `the same run. It ends ${Math.round(S.visitor.idle_s / 60)} min after the last page showing it closes (${S.visitor.runs} of ${S.visitor.max_runs} runs in use).` : "");
 }
 
 // ======================================================================================
@@ -1334,7 +1345,7 @@ function renderPipeline() {
   document.querySelector("#p-sim .what").textContent =
     `Replays the LJH pulses with their original timestamps, at ${currentSpeed()}× real time, as a live DAQ would, 100 records per chunk, `
     + `adding ${n - real} gain-adjusted copies to make a ${n}-channel array, and replays the experiment-state log alongside.`;
-  setFile("f-input", `<span><b>${fmt.int(st.chunks)}</b> chunks</span><span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.bytes(st.input_bytes)}</b></span>`);
+  setFile("f-input", `<span><b>${fmt.int(st.chunks)}</b> chunks</span><span><b>${fmt.int(st.records)}</b> records</span>`);
   setFile("f-statesfile", `<span><b>${fmt.int(S.timeline.length)}</b> state changes</span>`);
   document.getElementById("applyWhat").textContent =
     REPLAY ? `This recording was made in steps of ${fmtDuration(meta.fine_s)} of data; each playback step lights the loop once. Copies at a different gain use recipes of their own; exact copies use their real channel's.`
@@ -1350,8 +1361,8 @@ function renderPipeline() {
   document.getElementById("loopNote").textContent = lp.step_ms
     ? `↻ last poll took ${fmt.ms(Object.values(lp.step_ms).reduce((a, b) => a + b, 0))}, then waits and polls again`
     : `↻ then waits until ${S.meta.poll_s ?? 0.5} s after the poll began, and polls again`;
-  setFile("f-output", `<span><b>${fmt.int(st.chunks)}</b> batches</span><span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.bytes(st.output_bytes)}</b></span>`);
-  setFile("f-hist", `<span><b>${fmt.int(S.nDone)}</b> finished slices of ${fmtDuration(meta.slice_s)}</span>${st.histogram_bytes != null ? `<span><b>${fmt.bytes(st.histogram_bytes)}</b></span>` : ""}`);
+  setFile("f-output", `<span><b>${fmt.int(st.chunks)}</b> batches</span><span><b>${fmt.int(st.records)}</b> records</span>`);
+  setFile("f-hist", `<span><b>${fmt.int(S.nDone)}</b> finished slices of ${fmtDuration(meta.slice_s)}</span>`);
   const open = S.current.reduce((n, r) => n + Object.values(r.stateSum).reduce((a, v) => a + total(v), 0), 0);
   setFile("f-current", `<span><b>${fmt.int(open)}</b> good pulses so far</span>`);
   setFile("f-states", `<span><b>${fmt.int(S.timeline.length)}</b> state changes</span>`);
@@ -1362,6 +1373,22 @@ function renderPipeline() {
     + `at most every ${S.fits?.every_s ?? 10} s, then draws it with plotm.`;
   setFile("f-fits", `<span><b>${fmt.int(fits.length)}</b> fits</span>`
     + (lastFit ? `<span>FWHM <b>${lastFit.fwhm[0].toFixed(2)} eV</b></span><span>last fit ${fmt.ms(lastFit.fit_ms)}</span>` : ""));
+  // each file's size on disk, from the server; a recording knows only the two streams' sizes
+  const FB = S.fileBytes || {}, src = S.controller?.source_bytes || {};
+  const sum = (...xs) => xs.some(x => x != null) ? xs.reduce((a, x) => a + (x ?? 0), 0) : null;
+  const sizes = {
+    "f-ljh": sum(...Object.entries(src).filter(([name]) => name.endsWith(".ljh")).map(([, b]) => b)),
+    "f-recipe": src[files.recipe] ?? null,
+    "f-input": FB["pulses.arrows"] ?? (REPLAY ? st.input_bytes : null),
+    "f-statesfile": FB["pulses_experiment_state.txt"] ?? null,
+    "f-output": FB["analyzed.arrows"] ?? (REPLAY ? st.output_bytes : null),
+    "f-hist": FB["hist/histograms.arrows"] ?? null,
+    "f-current": FB["hist/histograms_current.arrows"] ?? null,
+    "f-states": FB["hist/states.json"] ?? null,
+    "f-status": FB["hist/status.json"] ?? null,
+    "f-fits": sum(FB["hist/fits/fits.json"], FB["hist/fits/latest.png"]),
+  };
+  for (const [id, b] of Object.entries(sizes)) if (b != null) document.querySelector(`#${id} .stats`).insertAdjacentHTML("beforeend", `<span><b>${fmtGB(b)}</b></span>`);
   document.getElementById("viewWhat").textContent = REPLAY
     ? "Plays the recording back one recorded poll at a time, as if reading the files above."
     : `Asks the viewer server for anything new every ${POLL_MS / 1000} s.`;
@@ -1392,6 +1419,7 @@ function animateLoop(lp) {
 // Rendering and interaction
 let geometry = null;
 // ---- resident memory (RSS) of each process involved, sampled by the server every 2 s (live server only)
+const fmtGB = b => b >= 1e6 ? `${(b / 1e9).toFixed(b >= 1e8 ? 2 : 3)} GB` : "< 0.001 GB";
 const fmtBytes = b => b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.round(b / 1e6)} MB`;
 const PROC_BOX = { "mass2-live-sim": "p-sim", "mass2-live-apply": "p-apply", "mass2-live-fit": "p-fit" };
 function renderMemory() {

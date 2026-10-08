@@ -28,9 +28,13 @@ import polars as pl
 import mass2
 from mass2.core.misc import PulseDataFromNumpy
 from mass2.core.recipe import Recipe
+from .parent import exit_with_parent
 from .arrow_stream import ArrowStreamTailer, ArrowStreamWriter, write_stream_atomically, write_text_atomically
 from .histogram import HistogramSpec, SlicedHistogrammer, slices_to_df
 from .states import StateFileFollower
+
+
+MAX_RECORDS = 2000  # records given to the recipe at once; its filters hold a few float64 copies of them
 
 
 def run_live(
@@ -46,6 +50,7 @@ def run_live(
     meta: dict | None = None,
     poll_s: float = 0.5,
     grace_s: float = 1.0,
+    max_records: int = MAX_RECORDS,
 ) -> None:
     """Follow `input_path` until its stream ends, writing results and histograms. See the module docstring."""
     hist_dir = Path(hist_dir)
@@ -54,7 +59,7 @@ def run_live(
     applier = LiveRecipeApplier(recipes, aliases)
     states = StateFileFollower(state_path)
     histogrammer = SlicedHistogrammer(spec, energy_col=energy_col, grace_s=grace_s)
-    reader = ArrowStreamTailer(input_path)
+    reader = ArrowStreamTailer(input_path, max_read_bytes=16 * 1024 * 1024)
     write_meta(hist_dir, spec, energy_col, recipes, poll_s, meta)
     counts = {"records": 0, "chunks": 0, "polls": 0}
 
@@ -63,10 +68,10 @@ def run_live(
         while not reader.ended:
             t_poll = time.time()
             batches = reader.poll()  # every complete batch appended since the last poll
-            if batches:
-                result = applier.process(states.label(pl.concat(batches, how="vertical_relaxed")))
+            for group in _groups(batches, max_records):  # the recipe sees at most max_records at once: bounded memory
+                result = applier.process(states.label(pl.concat(group, how="vertical_relaxed")))
                 start = 0
-                for batch in batches:  # one output batch per input batch
+                for batch in group:  # one output batch per input batch
                     results.write(result.slice(start, len(batch)))
                     start += len(batch)
                 if done := histogrammer.add(result):
@@ -79,6 +84,19 @@ def run_live(
             publish(hist_dir, histogrammer, states, applier, reader, results, counts, len(batches))
             if not reader.ended:
                 time.sleep(max(0.0, poll_s - (time.time() - t_poll)))
+
+
+def _groups(batches: list[pl.DataFrame], max_records: int) -> list[list[pl.DataFrame]]:
+    """Consecutive batches, grouped so each group holds at most `max_records` records (a bigger batch goes alone)."""
+    groups: list[list[pl.DataFrame]] = []
+    n = max_records
+    for b in batches:
+        if n + len(b) > max_records:
+            groups.append([])
+            n = 0
+        groups[-1].append(b)
+        n += len(b)
+    return groups
 
 
 class LiveRecipeApplier:
@@ -176,6 +194,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--e-hi", type=float, default=1200.0)
     p.add_argument("--bin", type=float, default=1.0, help="energy bin width, eV (default 1)")
     args = p.parse_args(argv)
+    exit_with_parent()
 
     print(f"mass2-live-apply: following {args.input}", flush=True)
     try:

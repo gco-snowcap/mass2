@@ -47,6 +47,10 @@ from ..histogram import HistogramSlice, HistogramSpec, df_to_slices
 
 
 ARROW_JS = "apache-arrow-21.2.0.es2015.min.js"  # Apache Arrow's JavaScript build, from npm, served at /arrow.js
+RUN_FILES = [
+    "pulses.arrows", "pulses_experiment_state.txt", "analyzed.arrows", "hist/histograms.arrows", "hist/histograms_current.arrows",
+    "hist/states.json", "hist/status.json", "hist/fits/fits.json", "hist/fits/latest.png",
+]  # fmt: skip
 ROWS = 120  # time-plot rows a page is sent at the start: more than its canvas shows (at most ~105)
 CATCH_UP_SLICES = 60  # a page further behind than this is sent a fresh `base` instead of the slices it missed
 KEEP_SLICES = 20_000  # slices kept, summed over channels, for time-plot rows: a few hundred MB at most
@@ -127,7 +131,7 @@ class HistogramStore:
         with self._lock:
             self._update()
             info: dict[str, Any] = {"run": self.run, "meta": self.meta, "status": None, "channels": [], "states": [], "n_slices": 0,
-                                    "selected_states": read_selected_states(self.hist_dir)}  # fmt: skip
+                                    "selected_states": read_selected_states(self.hist_dir), "file_bytes": self.file_bytes()}  # fmt: skip
             if self.meta is None:
                 return info, []
             current: list[HistogramSlice] = _read_if_exists(
@@ -149,6 +153,16 @@ class HistogramStore:
                 "n_slices": n,
                 "fits": _read_if_exists(self.hist_dir / "fits" / "fits.json", lambda p: json.loads(p.read_text()), None),
             }, rows
+
+    def file_bytes(self) -> dict[str, int]:
+        """Sizes of the run's files that exist, by path relative to the run directory (the histogram directory's parent)."""
+        run_dir, out = self.hist_dir.parent, {}
+        for name in RUN_FILES:
+            try:
+                out[name] = (run_dir / name).stat().st_size
+            except FileNotFoundError:
+                pass
+        return out
 
     def select_states(self, states: object) -> None:
         """Set the states the spectrum and the fit include, for every viewer: a list of labels, or None for all.
@@ -259,12 +273,16 @@ class MemorySampler:
     def __init__(self, name: str, controller: "Controller | None", every_s: float = 2.0):
         self.name, self.controller, self.every_s = name, controller, every_s
         self.latest: list[dict] = []
+        self._stop = threading.Event()
         threading.Thread(target=self._loop, daemon=True).start()
 
+    def stop(self) -> None:
+        self._stop.set()
+
     def _loop(self) -> None:
-        while True:
+        while not self._stop.is_set():
             self.latest = process_memory({self.name: os.getpid()} | (self.controller.pids() if self.controller else {}))
-            time.sleep(self.every_s)
+            self._stop.wait(self.every_s)
 
 
 def process_memory(pids: dict[str, int]) -> list[dict]:
@@ -288,47 +306,114 @@ def _read_if_exists(path: Path, read: Callable[[Path], T], default: T) -> T:
         return default
 
 
-def _handler_for(store: HistogramStore, controller: Controller | None, memory: MemorySampler) -> type[BaseHTTPRequestHandler]:
+@dataclass
+class Site:
+    """One run as the viewer serves it: its histograms, who runs its pipeline (if anyone), its memory report,
+    and anything else its pages should be told."""
+
+    store: HistogramStore
+    controller: Controller | None
+    memory: MemorySampler
+    extra: Callable[[], dict] = dict
+
+
+@dataclass(frozen=True)
+class Route:
+    """Where a request goes: a site and the path within it; or a redirect; or "busy" (no run for it now)."""
+
+    site: Site | None
+    path: str
+    redirect: str | None = None
+    busy: bool = False
+
+
+class Router(Protocol):
+    def route(self, path: str) -> Route: ...
+
+
+class OneSite:
+    """Every request goes to the one run."""
+
+    def __init__(self, site: Site):
+        self.site = site
+
+    def route(self, path: str) -> Route:
+        return Route(self.site, path)
+
+
+BUSY_PAGE = b"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="10"><title>mass2 live analysis</title>
+<body style="font-family: system-ui, sans-serif; max-width: 40em; margin: 3em auto; padding: 0 16px; line-height: 1.5">
+<h1 style="font-size: 1.3rem">mass2 live analysis</h1>
+<p>Every run this computer can host is in use right now. This page tries again every 10 seconds, and starts a
+run of your own as soon as one is free.</p></body>"""
+
+
+def _handler_for(router: Router) -> type[BaseHTTPRequestHandler]:
     page = resources.files("mass2.live.viewer").joinpath("viewer.html").read_bytes()
     arrow_js = resources.files("mass2.live.viewer").joinpath(ARROW_JS).read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             url = urlparse(self.path)
-            if url.path == "/":
+            r = router.route(url.path)
+            if r.redirect:
+                self.send_response(303)
+                self.send_header("Location", r.redirect)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            if r.path == "/arrow.js":
+                self._send(arrow_js, "text/javascript; charset=utf-8")
+                return
+            if r.busy:
+                if r.path.startswith("/api/"):
+                    self.send_error(503, "every run is in use")
+                else:
+                    self._send(BUSY_PAGE, "text/html; charset=utf-8", status=503)
+                return
+            if r.site is None:
+                self.send_error(404)
+                return
+            store, controller = r.site.store, r.site.controller
+            if r.path == "/":
                 self._send(page, "text/html; charset=utf-8")
-            elif url.path == "/fits/latest.png":
+            elif r.path == "/fits/latest.png":
                 png = _read_if_exists(store.hist_dir / "fits" / "latest.png", lambda p: p.read_bytes(), None)
                 if png is None:
                     self.send_error(404)
                 else:
                     self._send(png, "image/png")
-            elif url.path == "/api/state":
+            elif r.path == "/api/state":
                 query = parse_qs(url.query)
                 since, row_s = int(query.get("since", ["0"])[0]), float(query.get("row_s", ["0"])[0])
                 info, rows = store.state(since, row_s if row_s > 0 else None)
                 info["controller"] = controller.describe() if controller else None
-                info["processes"] = memory.latest
+                info["processes"] = r.site.memory.latest
+                info |= r.site.extra()
                 self._send(to_arrow_ipc(info, rows), "application/vnd.apache.arrow.stream")
-            elif url.path == "/arrow.js":
-                self._send(arrow_js, "text/javascript; charset=utf-8")
             else:
                 self.send_error(404)
 
         def do_POST(self) -> None:
-            path = urlparse(self.path).path
-            if path not in {"/api/states", "/api/dataset", "/api/speed"} or (controller is None and path != "/api/states"):
+            r = router.route(urlparse(self.path).path)
+            if r.busy:
+                self.send_error(503, "every run is in use")
+                return
+            site = r.site
+            if site is None or r.path not in {"/api/states", "/api/dataset", "/api/speed"} or (site.controller is None and r.path != "/api/states"):
                 self.send_error(404)
                 return
+            controller = site.controller
             try:
                 request = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 65536)) or b"{}")
-                if path == "/api/states":
-                    store.select_states(request["states"])
+                if r.path == "/api/states":
+                    site.store.select_states(request["states"])
                     self._send(b"{}", "application/json")
                     return
                 if controller is None:
-                    raise KeyError(path)
-                if path == "/api/dataset":
+                    raise KeyError(r.path)
+                if r.path == "/api/dataset":
                     controller.switch(request["key"])
                 else:
                     controller.set_speed(float(request["speed"]))
@@ -337,8 +422,8 @@ def _handler_for(store: HistogramStore, controller: Controller | None, memory: M
                 return
             self._send(json.dumps(controller.describe()).encode(), "application/json")
 
-        def _send(self, body: bytes, content_type: str) -> None:
-            self.send_response(200)
+        def _send(self, body: bytes, content_type: str, status: int = 200) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", content_type)
             if content_type != "image/png" and "gzip" in self.headers.get("Accept-Encoding", ""):
                 body = gzip.compress(body, compresslevel=5)  # the counts are mostly digits: several times smaller
@@ -357,9 +442,15 @@ def _handler_for(store: HistogramStore, controller: Controller | None, memory: M
 def start_server(
     store: HistogramStore, port: int = 8765, host: str = "127.0.0.1", controller: Controller | None = None
 ) -> tuple[ThreadingHTTPServer, int]:
-    """Serve in a background thread. Returns the server and the actual port (useful with port=0)."""
-    memory = MemorySampler("mass2-live-demo" if controller else "mass2-live-view", controller)
-    server = ThreadingHTTPServer((host, port), _handler_for(store, controller, memory))
+    """Serve one run in a background thread. Returns the server and the actual port (useful with port=0)."""
+    site = Site(store, controller, MemorySampler("mass2-live-demo" if controller else "mass2-live-view", controller))
+    return start_router_server(OneSite(site), port, host)
+
+
+def start_router_server(router: Router, port: int = 8765, host: str = "127.0.0.1") -> tuple[ThreadingHTTPServer, int]:
+    """Serve whatever `router` sends each request to, in a background thread."""
+    server = ThreadingHTTPServer((host, port), _handler_for(router))
+    server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
 

@@ -11,13 +11,19 @@ The data are replayed again and again, continuing the timeline, so the run goes 
 of playback speed never interrupts it. Only when the run's files reach `--max-gb` does it start over from
 empty files, so the disk never holds more than that.
 
-Each pipeline tool runs as its own process, exactly as it would from the command line. Ctrl-C stops them all.
+Each pipeline tool runs as its own process, exactly as it would from the command line, and exits if the demo
+is gone. A run whose tool fails is started over. Ctrl-C stops them all.
 
-Command line:  mass2-live-demo [WORKDIR] [--dataset bessy_20240727] [--speed 5] [--max-gb 20] [--lan] [--port 8765]
+By default every viewer shares one run. With `--visitors N`, each visitor gets a run of their own at an
+address of its own (see `visitors.py`), at most N at once.
+
+Command line:  mass2-live-demo [WORKDIR] [--dataset bessy_20240727] [--speed 5] [--max-gb 20] [--visitors N]
+                               [--lan] [--port 8765]
 """
 
 import argparse
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -30,7 +36,8 @@ from pathlib import Path
 from .datasets import DATASETS, DemoDataset
 from .simulate import state_file_path
 from ..fit import read_selected_states, write_selected_states
-from ..viewer.server import HistogramStore, start_server, viewer_urls
+from ..parent import PARENT_ENV
+from ..viewer.server import HistogramStore, start_router_server, start_server, viewer_urls
 
 MIN_SPEED, MAX_SPEED = 1.0, 600.0  # the viewer's playback-speed slider runs 1x to 600x real time
 
@@ -48,6 +55,8 @@ class DemoController:
         self.phase = "starting"
         self._procs: dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
+        self._restarts: list[float] = []  # times the run was restarted after a failure
+        self._checked = 0.0
 
     def describe(self) -> dict:
         return {
@@ -55,6 +64,7 @@ class DemoController:
             "active": self.active,
             "phase": self.phase,
             "speed": self.speed,
+            "source_bytes": source_bytes(DATASETS[self.active]) if self.active else {},
         }
 
     def set_speed(self, speed: float) -> None:
@@ -107,6 +117,26 @@ class DemoController:
             return 0
         return sum(p.stat().st_size for p in (self.workdir / self.active).rglob("*") if p.is_file())
 
+    def maintain(self, max_gb: float) -> None:
+        """Keep the run going; call it often. Starts the run over when a tool has failed (at most 3 times in 5
+        minutes, then once a minute), when every pass asked for is done, or when its files reach `max_gb`."""
+        if self.active is None:
+            return
+        now = time.time()
+        if failed := self.failed():
+            self._restarts = [t for t in self._restarts if now - t < 300]
+            if len(self._restarts) >= 3 and now - self._restarts[-1] < 60:
+                return
+            print(f"mass2-live-demo: {', '.join(failed)} failed; starting the run over", flush=True)
+            self._restarts.append(now)
+            self.switch(self.active)
+        elif self.pass_done():
+            self.switch(self.active)  # every pass asked for is done: start over
+        elif now - self._checked > 10:
+            self._checked = now
+            if self.run_bytes() > max_gb * 1e9:
+                self.switch(self.active)  # start over, so the run's files never outgrow max_gb
+
     def failed(self) -> list[str]:
         """Names of pipeline tools that exited with an error."""
         with self._lock:
@@ -122,6 +152,12 @@ class DemoController:
         for proc in self._procs.values():
             proc.wait()
         self._procs = {}
+
+
+def source_bytes(dataset: DemoDataset) -> dict[str, int]:
+    """Sizes of the files a run starts from: the LJH files and the saved recipe."""
+    files = [*Path(dataset.pulse_folder).glob("*_chan*.ljh"), dataset.recipe_path]
+    return {p.name: p.stat().st_size for p in files}
 
 
 def viewer_meta(dataset: DemoDataset) -> dict:
@@ -151,10 +187,11 @@ def pipeline_processes(dataset: DemoDataset, run_dir: Path, repeats: int, sim_ex
         sim += ["--scale", f"{s.source_ch}:{s.new_ch}:{s.factor}"]
     fit = [sys.executable, "-m", "mass2.live.fit", str(hist), "--line", str(roi.line), "--dlo", str(roi.dlo), "--dhi", str(roi.dhi)]
     fit += ["--source", roi.source]
+    env = os.environ | {PARENT_ENV: str(os.getpid())}  # each tool exits if this process is gone
     return {
-        "mass2-live-apply": subprocess.Popen(apply),
-        "mass2-live-sim": subprocess.Popen(sim),
-        "mass2-live-fit": subprocess.Popen(fit),
+        "mass2-live-apply": subprocess.Popen(apply, env=env),
+        "mass2-live-sim": subprocess.Popen(sim, env=env),
+        "mass2-live-fit": subprocess.Popen(fit, env=env),
     }
 
 
@@ -169,47 +206,57 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--repeats", type=int, default=0,
         help="passes over the data in one run, after which the run starts over (default 0: replay without end)",
     )
-    p.add_argument("--max-gb", type=float, default=20.0, help="start the run over when its files reach this size, GB (default 20)")
+    p.add_argument(
+        "--max-gb", type=float, default=None,
+        help="start a run over when its files reach this size, GB (default 20; 4 per run with --visitors)",
+    )
     p.add_argument(
         "--speed", type=float, default=5.0, help="starting playback speed, multiples of real time (default 5); change it in the page"
     )
+    p.add_argument(
+        "--visitors", type=int, default=0, metavar="N",
+        help="give each visitor a run of their own, at most N at once (default 0: one run, shared by every viewer)",
+    )
+    p.add_argument("--idle", type=float, default=180, help="with --visitors: stop a run nobody has viewed for this long, seconds (default 180)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--lan", action="store_true", help="serve the viewer to other devices on this network, e.g. a phone")
     p.add_argument("--no-browser", action="store_true")
     args = p.parse_args(argv)
+    max_gb = args.max_gb if args.max_gb is not None else (4.0 if args.visitors else 20.0)
 
     args.workdir.mkdir(parents=True, exist_ok=True)
-    store = HistogramStore(args.workdir / args.dataset / "hist")
-    controller = DemoController(args.workdir, store, args.repeats)
-    controller.speed = args.speed
     host = "0.0.0.0" if args.lan else "127.0.0.1"
-    server, port = start_server(store, args.port, host, controller)
-    controller.switch(args.dataset)
+    if args.visitors:
+        from .visitors import VisitorRuns  # noqa: PLC0415
+
+        runs = VisitorRuns(args.workdir, max_runs=args.visitors, dataset=args.dataset, speed=args.speed, repeats=args.repeats, idle_s=args.idle)
+        server, port = start_router_server(runs, args.port, host)
+        keep_going, stop = (lambda: runs.tick(max_gb)), runs.stop_all
+    else:
+        store = HistogramStore(args.workdir / args.dataset / "hist")
+        controller = DemoController(args.workdir, store, args.repeats)
+        controller.speed = args.speed
+        server, port = start_server(store, args.port, host, controller)
+        controller.switch(args.dataset)
+        keep_going, stop = (lambda: controller.maintain(max_gb)), controller.stop
 
     urls = viewer_urls(host, port)
     print(f"mass2-live-demo: viewer at {'  '.join(urls)}  (Ctrl-C to stop)", flush=True)
     if args.lan:
-        print("mass2-live-demo: open the first address on a phone on the same network. Anyone on it can view and switch.", flush=True)
+        print("mass2-live-demo: open the first address on a phone on the same network.", flush=True)
     if not args.no_browser:
         webbrowser.open(urls[-1])
 
     # SIGTERM (e.g. from `kill` or `timeout`) must clean up the children exactly as Ctrl-C does.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
-        checked = 0.0
-        while not (failed := controller.failed()):
-            if controller.active is not None and controller.pass_done():
-                controller.switch(controller.active)  # every pass asked for is done: start over
-            if time.time() - checked > 10:
-                checked = time.time()
-                if controller.active is not None and controller.run_bytes() > args.max_gb * 1e9:
-                    controller.switch(controller.active)  # start over, so the run's files never outgrow --max-gb
+        while True:
+            keep_going()
             time.sleep(0.5)
-        print(f"mass2-live-demo: {', '.join(failed)} failed; stopping everything", flush=True)
     except KeyboardInterrupt:
         pass
     finally:
-        controller.stop()
+        stop()
         server.shutdown()
 
 
