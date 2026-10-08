@@ -393,7 +393,7 @@ const POLL_MS = REPLAY ? 500 : 2000;  // a replay ticks once per recorded poll o
 // ======================================================================================
 // Replay of a recorded run (pages made by mass2-live-export): answers like the server's /api/state.
 function makeReplay(data) {
-  // A recording holds the slices mass2-live-apply finished, with their original timestamps:
+  // A recording holds one pass of the slices mass2-live-apply finished, with their original timestamps:
   // [seconds after t0, records, chunks, {state: {channel: [bin gap, count, ...]}}]. Playing it at `speed`
   // times real time hands the page the same answers the live server would give at that moment.
   const byKey = Object.fromEntries(data.datasets.map(d => [d.key, d]));
@@ -410,7 +410,7 @@ function makeReplay(data) {
   }
   let active = data.datasets[0].key, run = 1, speed = 5, virt = 0, lastWall = Date.now();
   const tick = () => { const now = Date.now(); virt += (now - lastWall) / 1000 * speed; lastWall = now; return virt; };
-  const restart = () => { virt = 0; lastWall = Date.now(); run += 1; };
+  const restart = () => { virt = 0; lastWall = Date.now(); run += 1; };  // a new dataset only
 
   return {
     speeds: [1, 2, 5, 10, 30, 60, 120, 300, 600],
@@ -418,25 +418,31 @@ function makeReplay(data) {
     setSpeed(x) { tick(); speed = x; },
     switch(key) { if (byKey[key]) { active = key; restart(); } },
     state(since) {
-      const d = byKey[active], t0 = d.meta.t0, sl = d.meta.slice_s;
-      let elapsed = tick();
-      if (elapsed > d.duration + sl) { restart(); elapsed = 0; }  // loop
-      const nDone = Math.min(d.slices.length, Math.floor(elapsed / sl));
-      const [records, chunks, good] = d.cum[nDone], bpc = d.meta.bytes_per_chunk;
-      const states = d.states.filter(([t]) => t <= elapsed).map(([t, l]) => [t0 + t, l]);
+      // The recording is replayed again and again, continuing the timeline, as mass2-live-demo does: pass p
+      // of the data is shifted p recording-lengths later, and every count keeps adding up.
+      const d = byKey[active], t0 = d.meta.t0, sl = d.meta.slice_s, N = d.slices.length;
+      const elapsed = tick(), nDone = Math.floor(elapsed / sl), passOf = k => Math.floor(k / N);
+      const shift = k => passOf(k) * d.duration;
+      const end = d.cum[N], c = d.cum[nDone % N], p = passOf(nDone);
+      const [records, chunks, good] = [0, 1, 2].map(j => p * end[j] + c[j]), bpc = d.meta.bytes_per_chunk;
+      const states = [];
+      for (let q = 0; q <= p; q++) for (const [t, l] of d.states) if (q * d.duration + t <= elapsed) states.push([t0 + q * d.duration + t, l]);
+      const slices = [];
+      for (let k = Math.max(0, since); k < nDone; k++) { const [t, , , counts] = d.slices[k % N]; slices.push({ t: t0 + shift(k) + t, counts }); }
+      const inPass = elapsed - p * d.duration;
       return {
-        run, meta: d.meta, n_slices: nDone, states, current: [],
-        slices: d.slices.slice(since, nDone).map(([t, , , counts]) => ({ t: t0 + t, counts })),
+        run, meta: d.meta, n_slices: nDone, states, current: [], slices,
         channels: Object.keys(d.meta.layout).sort((a, b) => a - b),
         status: {
           records, chunks, polls: nDone, good_pulses: good, late_records: 0, channels_without_recipe: [],
           input_bytes: Math.round(chunks * bpc.input), output_bytes: Math.round(chunks * bpc.output),
           state_changes: states.length, stream_ended: false, updated_unix_s: Date.now() / 1000,
-          first_data_us: (t0 + d.firstT) * 1e6, latest_data_us: (t0 + Math.min(elapsed, d.duration)) * 1e6,
-          last_poll: { new_chunks: nDone ? d.slices[nDone - 1][2] : 0 },
+          first_data_us: (t0 + d.firstT) * 1e6, latest_data_us: (t0 + elapsed) * 1e6,
+          last_poll: { new_chunks: nDone ? d.slices[(nDone - 1) % N][2] : 0 },
         },
         controller: { datasets: data.datasets.map(x => ({ key: x.key, title: x.title })), active, phase: "running", speed },
-        fits: { ...d.fits, fits: d.fits.fits.filter(f => f.t <= elapsed).map(f => ({ ...f, t: t0 + f.t })) },
+        // the recording's fits cover one pass: this pass's, so far
+        fits: { ...d.fits, fits: d.fits.fits.filter(f => f.t <= inPass).map(f => ({ ...f, t: t0 + p * d.duration + f.t })) },
       };
     },
   };
