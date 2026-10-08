@@ -1,19 +1,22 @@
 """Serve a live web view of the histograms written by `mass2-live-apply`.
 
 GET  /                     the viewer page
-GET  /api/state?since=K    JSON: meta, status, channels, states, finalized slices with index >= K, open slice(s), fits
+GET  /api/state?since=K&row_s=L   JSON: meta, status, channels, states, finalized slices with index >= K (or, for a
+                           page starting or far behind, a `base` of totals and time-plot rows L s long), open slice(s), fits
 GET  /fits/latest.png      the latest line fit drawn by mass2-live-fit
 POST /api/dataset          {"key": NAME} switch dataset   } only when run by mass2-live-demo,
 POST /api/speed            {"speed": X} playback speed  } which owns the simulator
 
-The browser keeps the slices it has already received and asks only for newer ones, so each refresh costs
-roughly one slice's worth of data no matter how long the run has been going. `run` changes whenever the
+A page starts from a `base`: the totals and the newest time-plot rows, the same size however long the run
+has been going. It then asks only for newer slices, so each refresh costs roughly one slice's worth of data.
+The finished slices themselves stay in this process and in histograms.arrows. `run` changes whenever the
 histogram directory is reset (e.g. a dataset switch), telling the browser to drop what it holds.
 
 Command line:  mass2-live-view HIST_DIR [--port 8765] [--lan]
 """
 
 import argparse
+import gzip
 import json
 import socket
 import threading
@@ -25,10 +28,16 @@ from collections.abc import Callable
 from typing import Any, Protocol, TypeVar
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 import polars as pl
+from numpy.typing import NDArray
 
 from ..arrow_stream import ArrowStreamTailer
 from ..histogram import HistogramSlice, HistogramSpec, df_to_slices, sparse_counts
+
+
+ROWS = 120  # time-plot rows a page is sent at the start: more than its canvas shows (at most ~105)
+CATCH_UP_SLICES = 60  # a page further behind than this is sent a fresh `base` instead of the slices it missed
 
 
 class Controller(Protocol):
@@ -56,6 +65,7 @@ class HistogramStore:
             self._tailer = ArrowStreamTailer(self.hist_dir / "histograms.arrows")
             self.meta: dict | None = None
             self.slices: list[HistogramSlice] = []
+            self.totals: dict[tuple[int, str], NDArray[np.int64]] = {}  # every finished slice, summed
             self.channels: set[int] = set()
             self.run += 1
 
@@ -72,14 +82,25 @@ class HistogramStore:
                     self.slices[-1].counts.update(s.counts)  # a slice can arrive in more than one batch
                 else:
                     self.slices.append(s)
+                for key, c in s.counts.items():
+                    if key in self.totals:
+                        self.totals[key] += c
+                    else:
+                        self.totals[key] = c.copy()
 
     @property
     def spec(self) -> HistogramSpec:
         assert self.meta is not None
         return HistogramSpec(self.meta["e_lo"], self.meta["e_hi"], self.meta["bin_width"], self.meta["slice_s"])
 
-    def state(self, since: int = 0) -> dict:
-        """Everything the page needs, with finalized slices from index `since` onward."""
+    def state(self, since: int = 0, row_s: float | None = None) -> dict:
+        """Everything the page needs, with finalized slices from index `since` onward.
+
+        A page that is starting, or far behind, gets a `base` instead of every slice so far: the totals of
+        all finished slices, and the newest `ROWS` complete rows of the time plot (rows `row_s` long, summed
+        over channels), followed by only the finished slices of the row still filling. What it is sent then
+        stays the same size however long the run has gone; the slices themselves stay on this machine.
+        """
         with self._lock:
             self._update()
             empty: dict[str, Any] = {
@@ -98,16 +119,38 @@ class HistogramStore:
                 self.hist_dir / "histograms_current.arrows", lambda p: df_to_slices(pl.read_ipc_stream(p), self.spec), []
             )
             channels = self.channels | {ch for s in current for ch, _ in s.counts}
+            n = len(self.slices)
+            base = None
+            if since <= 0 or since > n or n - since > CATCH_UP_SLICES:
+                base, since = self._base(row_s)
             return empty | {
+                "base": base,
                 "meta": self.meta,
                 "status": _read_if_exists(self.hist_dir / "status.json", lambda p: json.loads(p.read_text()), None),
                 "states": _read_if_exists(self.hist_dir / "states.json", lambda p: json.loads(p.read_text()), []),
                 "channels": [str(ch) for ch in sorted(channels)],
                 "n_slices": len(self.slices),
-                "slices": [_slice_json(s) for s in self.slices[since:]],
+                # after a base, the slices of the row still filling are in its totals: the time plot needs only their sum over channels
+                "slices": [_slice_json(s, summed=base is not None) for s in self.slices[since:]],
                 "current": [_slice_json(s) for s in current],
                 "fits": _read_if_exists(self.hist_dir / "fits" / "fits.json", lambda p: json.loads(p.read_text()), None),
             }
+
+    def _base(self, row_s: float | None) -> tuple[dict, int]:
+        """The `base` of `state`, and the index of the first finished slice the page still needs."""
+        slice_us = round(self.spec.slice_s * 1e6)
+        row_us = max(1, round((row_s or self.spec.slice_s) * 1e6 / slice_us)) * slice_us
+        row_of = [s.start_us // row_us for s in self.slices]  # rows on a fixed grid, as the page lays them out
+        open_row = (self.slices[-1].start_us + slice_us) // row_us if self.slices else 0
+        first_open = next((k for k, r in enumerate(row_of) if r >= open_row), len(self.slices))
+        sums: dict[int, dict[str, NDArray[np.int64]]] = {}
+        for s, r in zip(self.slices[:first_open], row_of[:first_open]):
+            if r >= open_row - ROWS:
+                row = sums.setdefault(r, {})
+                for (_, state), c in s.counts.items():
+                    row[state] = row[state] + c if state in row else c.copy()
+        rows = [{"t": r * row_us / 1e6, "counts": sparse_counts({(0, st): c for st, c in sums[r].items()})} for r in sorted(sums)]
+        return {"totals": sparse_counts(self.totals), "row_s": row_us / 1e6, "rows": rows}, first_open
 
 
 T = TypeVar("T")
@@ -121,9 +164,15 @@ def _read_if_exists(path: Path, read: Callable[[Path], T], default: T) -> T:
         return default
 
 
-def _slice_json(s: HistogramSlice) -> dict:
-    """{"t": start seconds, "counts": {state: {channel: [bin gap, count, ...]}}} (see `sparse_counts`)."""
-    return {"t": s.start_us / 1e6, "counts": sparse_counts(s.counts)}
+def _slice_json(s: HistogramSlice, summed: bool = False) -> dict:
+    """{"t": start seconds, "counts": {state: {channel: [bin gap, count, ...]}}} (see `sparse_counts`).
+    `summed`: one entry per state, channel "0", holding the sum over channels."""
+    counts = s.counts
+    if summed:
+        counts = {}
+        for (_, state), c in s.counts.items():
+            counts[(0, state)] = counts[(0, state)] + c if (0, state) in counts else c.copy()
+    return {"t": s.start_us / 1e6, "counts": sparse_counts(counts)}
 
 
 def _handler_for(store: HistogramStore, controller: Controller | None) -> type[BaseHTTPRequestHandler]:
@@ -141,8 +190,9 @@ def _handler_for(store: HistogramStore, controller: Controller | None) -> type[B
                 else:
                     self._send(png, "image/png")
             elif url.path == "/api/state":
-                since = int(parse_qs(url.query).get("since", ["0"])[0])
-                body = store.state(since) | {"controller": controller.describe() if controller else None}
+                query = parse_qs(url.query)
+                since, row_s = int(query.get("since", ["0"])[0]), float(query.get("row_s", ["0"])[0])
+                body = store.state(since, row_s if row_s > 0 else None) | {"controller": controller.describe() if controller else None}
                 self._send(json.dumps(body).encode(), "application/json")
             else:
                 self.send_error(404)
@@ -166,6 +216,9 @@ def _handler_for(store: HistogramStore, controller: Controller | None) -> type[B
         def _send(self, body: bytes, content_type: str) -> None:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            if content_type != "image/png" and "gzip" in self.headers.get("Accept-Encoding", ""):
+                body = gzip.compress(body, compresslevel=5)  # the counts are mostly digits: several times smaller
+                self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()

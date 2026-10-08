@@ -7,6 +7,8 @@ For the chosen dataset (see `datasets.py`):
    Fake channels at a different gain have recipes of their own in it; exact copies borrow their source channel's.
 3. Start `mass2-live-fit`, refitting the line the original analysis fitted, on all channels summed.
 The viewer is served from this process. Picking another dataset in the page stops 1 and 2 and restarts them.
+When a run has replayed its data (`--repeats` passes, default 1) it starts over from empty files, so the files
+on disk never hold more than one run.
 
 Each pipeline tool runs as its own process, exactly as it would from the command line. Ctrl-C stops them all.
 
@@ -82,6 +84,12 @@ class DemoController:
             self._procs = pipeline_processes(dataset, run_dir, self.repeats, self.sim_extra)
             self.phase = "running"
 
+    def pass_done(self) -> bool:
+        """True once mass2-live-apply has finished the stream: the simulator's passes over the data are all written."""
+        with self._lock:
+            proc = self._procs.get("mass2-live-apply")
+            return proc is not None and proc.poll() == 0
+
     def failed(self) -> list[str]:
         """Names of pipeline tools that exited with an error."""
         with self._lock:
@@ -140,7 +148,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         "workdir", type=Path, nargs="?", default=Path("mass2_live_demo"), help="output directory (default ./mass2_live_demo)"
     )
     p.add_argument("--dataset", choices=sorted(DATASETS), default="bessy_20240727", help="dataset to start with")
-    p.add_argument("--repeats", type=int, default=0, help="times to replay the data; 0 = forever (default)")
+    p.add_argument(
+        "--repeats", type=int, default=1,
+        help="passes over the data in one run, after which the run starts over from empty files (default 1); 0 = one endless run",
+    )
     p.add_argument(
         "--speed", type=float, default=5.0, help="starting playback speed, multiples of real time (default 5); change it in the page"
     )
@@ -168,6 +179,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         while not (failed := controller.failed()):
+            if controller.pass_done() and controller.active is not None:
+                controller.switch(controller.active)  # start over, so the run's files never outgrow one pass
             time.sleep(0.5)
         print(f"mass2-live-demo: {', '.join(failed)} failed; stopping everything", flush=True)
     except KeyboardInterrupt:

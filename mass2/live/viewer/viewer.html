@@ -375,6 +375,8 @@ const fmt = {
 // State
 const S = {
   run: null, meta: null, slices: [], current: [], channels: [], status: null, controller: null,
+  nDone: 0,            // finished slices accounted for, in the totals and the time-plot rows
+  baseRows: [], baseRowS: null,  // time-plot rows the server built for this page's row length
   timeline: [], stateNames: [], hiddenStates: new Set(), overlay: [], metric: "counts", log: true, view: null,
   tab: "spectra", detail: null, fits: null,
   prev: null,          // previous status, for "+N since last update" and the rate
@@ -458,8 +460,9 @@ function currentSpeed() { return REPLAY ? REPLAY.speed : (S.controller?.speed ??
 // Data in
 async function poll() {
   try {
-    const since = S.slices.length;
-    const s = REPLAY ? REPLAY.state(since) : await (await fetch(`api/state?since=${since}`, { cache: "no-store" })).json();
+    const rowS = S.meta ? rowLength() : 0;
+    const since = S.baseRowS != null && S.baseRowS !== rowS ? 0 : S.nDone;  // a new row length: ask for a new base
+    const s = REPLAY ? REPLAY.state(since) : await (await fetch(`api/state?since=${since}&row_s=${rowS}`, { cache: "no-store" })).json();
     if (s.run !== S.run) {
       resetData(s.run);
       if (since > 0) { setTimeout(poll, 0); return; }  // a new run: ask again from the start
@@ -472,8 +475,9 @@ async function poll() {
 }
 
 // Slices arrive sparse: {t, counts: {state: {channel: [bin gap, count, ...]}}}. Each finished slice is added once
-// into running totals (for the spectrum and the map) and kept sparse (for the time plot). The slice still
-// filling (live server only) is decoded fresh on each update.
+// into running totals (for the spectrum and the map) and kept sparse (for the time plot) until its row is
+// built. The slice still filling (live server only) is decoded fresh on each update. A page starting, or far
+// behind, gets a `base` from the live server instead: the totals so far and the newest time-plot rows.
 const T = { byState: {}, stateSum: {} };
 function decodeInto(target, pairs) { for (let q = 0, i = 0; q < pairs.length; q += 2) { i += pairs[q]; target[i] += pairs[q + 1]; } }
 function addToTotals(counts) {
@@ -492,8 +496,14 @@ function decodeOpen(slice) {  // the open slice, dense, by state and channel, fo
   return row;
 }
 
+function decodeRow(r) {  // a time-plot row from the server: {t, counts: {state: {"0": pairs}}}, summed over channels
+  const row = { t: r.t, stateSum: {}, live: false };
+  for (const [st, chans] of Object.entries(r.counts)) for (const pairs of Object.values(chans)) decodeInto((row.stateSum[st] ??= new Float32Array(S.meta.nbins)), pairs);
+  return row;
+}
+
 function resetData(run) {
-  Object.assign(S, { run, meta: null, slices: [], current: [], channels: [], timeline: [], stateNames: [], view: null,
+  Object.assign(S, { run, meta: null, slices: [], current: [], channels: [], timeline: [], stateNames: [], view: null, nDone: 0, baseRows: [], baseRowS: null,
     overlay: [], detail: null, prev: null, rate: null, gain: {}, status: null, rowCache: null });
   T.byState = {}; T.stateSum = {};
   S.hiddenStates.clear();
@@ -504,7 +514,13 @@ function ingest(s) {
   showDatasets();
   if (s.meta) {
     if (!S.meta) { S.meta = s.meta; S.view = [s.meta.e_lo, s.meta.e_hi]; }
-    for (const sl of s.slices) { addToTotals(sl.counts); S.slices.push(sl); }
+    if (s.base) {  // totals and rows so far; the slices that follow are those of the row still filling, already in the totals
+      T.byState = {}; T.stateSum = {};
+      addToTotals(s.base.totals);
+      S.baseRows = s.base.rows.map(decodeRow); S.baseRowS = s.base.row_s;
+      S.slices = [...s.slices]; S.rowCache = null;
+    } else for (const sl of s.slices) { addToTotals(sl.counts); S.slices.push(sl); }
+    S.nDone = s.n_slices;
     S.current = s.current.map(decodeOpen);
     S.timeline = s.states;
     S.fits = s.fits || null;
@@ -528,6 +544,7 @@ function ingest(s) {
 
 // ---- time-plot rows: groups of consecutive slices, sized so a row fills in ~12 s of wall time at the
 // current playback speed (never shorter than one slice). Finished rows are built once and kept.
+const MAX_ROWS = 120;  // more than the canvas shows (one row needs at least 4 px)
 const ROW_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 21600, 43200];
 function rowLength() {
   const base = S.meta.slice_s, want = currentSpeed() * 12;
@@ -536,13 +553,15 @@ function rowLength() {
 }
 function timeRows() {
   const len = rowLength(), base = S.meta.slice_s;
-  if (!S.slices.length && !S.current.length) return { len, rows: [] };
+  const fromServer = S.baseRowS === len ? S.baseRows : [];
+  if (!S.slices.length && !S.current.length && !fromServer.length) return { len, rows: [] };
   if (!S.rowCache || S.rowCache.len !== len) {
-    const first = (S.slices[0] ?? S.current[0]).t;
-    S.rowCache = { len, origin: Math.floor(first / len) * len, done: [], next: 0 };
+    const first = (fromServer[0] ?? S.slices[0] ?? S.current[0]).t;
+    S.rowCache = { len, origin: Math.floor(first / len) * len, done: [...fromServer], next: 0 };
   }
   const C = S.rowCache, nb = S.meta.nbins, rowOf = t => Math.floor((t - C.origin) / len + 1e-9);
-  const dataEnd = S.slices.length ? S.slices.at(-1).t + base : C.origin;
+  const lastDone = C.done.at(-1);
+  const dataEnd = S.slices.length ? S.slices.at(-1).t + base : lastDone ? lastDone.t + len : C.origin;
   const firstOpenRow = rowOf(dataEnd);  // rows before this one have all their slices
   const build = (k, members) => {
     const row = { t: C.origin + k * len, stateSum: {}, live: false };
@@ -557,6 +576,8 @@ function timeRows() {
     C.done.push(build(k, members));
   }
   C.next = i;
+  if (C.done.length > MAX_ROWS) C.done.splice(0, C.done.length - MAX_ROWS);
+  if (!REPLAY) { S.slices.splice(0, C.next); C.next = 0; }  // built into rows; a new row length brings a new base
   // the row still filling: its finished slices, plus the slice the server is still filling
   const rows = [...C.done];
   const open = build(firstOpenRow, S.slices.slice(C.next));
@@ -1233,7 +1254,7 @@ function renderPipeline() {
     ? `↻ last poll took ${fmt.ms(Object.values(lp.step_ms).reduce((a, b) => a + b, 0))}, then waits and polls again`
     : `↻ then waits until ${S.meta.poll_s ?? 0.5} s after the poll began, and polls again`;
   setFile("f-output", `<span><b>${fmt.int(st.chunks)}</b> batches</span><span><b>${fmt.int(st.records)}</b> records</span><span><b>${fmt.bytes(st.output_bytes)}</b></span>`);
-  setFile("f-hist", `<span><b>${fmt.int(S.slices.length)}</b> finished slices of ${fmtDuration(meta.slice_s)}</span>${st.histogram_bytes != null ? `<span><b>${fmt.bytes(st.histogram_bytes)}</b></span>` : ""}`);
+  setFile("f-hist", `<span><b>${fmt.int(S.nDone)}</b> finished slices of ${fmtDuration(meta.slice_s)}</span>${st.histogram_bytes != null ? `<span><b>${fmt.bytes(st.histogram_bytes)}</b></span>` : ""}`);
   const open = S.current.reduce((n, r) => n + Object.values(r.stateSum).reduce((a, v) => a + total(v), 0), 0);
   setFile("f-current", `<span><b>${fmt.int(open)}</b> good pulses so far</span>`);
   setFile("f-states", `<span><b>${fmt.int(S.timeline.length)}</b> state changes</span>`);
